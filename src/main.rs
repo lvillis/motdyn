@@ -34,12 +34,7 @@ struct MotdConfig {
 
 /// CLI entry point. Supports subcommands for install/uninstall/status, or runs MOTD if none.
 #[derive(Parser, Debug)]
-#[command(
-    name = "motdyn",
-    version = "0.1.0",
-    author = "Your Name",
-    about = "MOTD with optional sysinfo, plus install/uninstall/status subcommands"
-)]
+#[command(author, version, about, long_about = None)]
 struct Cli {
     /// Show more detailed info when printing
     #[arg(short, long, global = true)]
@@ -101,7 +96,7 @@ fn do_install() -> Result<(), Box<dyn std::error::Error>> {
             "Directory '{}' not found, cannot install system-wide script.",
             profile_dir
         )
-        .into());
+            .into());
     }
 
     let script_path = format!("{}/motdyn.sh", profile_dir);
@@ -215,25 +210,15 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
 
     let (os_name, os_version) = get_os_info();
     let now = Local::now();
-
-    // Now includes timezone info in the time string
-    // e.g. "2024-12-27 17:36:25 +08:00"
     let now_str_with_tz = now.format("%Y-%m-%d %H:%M:%S %:z").to_string();
 
     // Parse uptime from /proc/uptime
-    let uptime_str = match parse_uptime() {
-        Some(up_str) => up_str,
-        None => "unknown".to_string(),
-    };
+    let uptime_str = parse_uptime().unwrap_or_else(|| "unknown".to_string());
 
-    let kernel_version = match read_first_line("/proc/sys/kernel/osrelease") {
-        Some(s) => s,
-        None => "Unknown kernel".to_string(),
-    };
-    let host_name = match read_first_line("/proc/sys/kernel/hostname") {
-        Some(s) => s,
-        None => "Unknown host".to_string(),
-    };
+    let kernel_version = read_first_line("/proc/sys/kernel/osrelease")
+        .unwrap_or_else(|| "Unknown kernel".to_string());
+    let host_name = read_first_line("/proc/sys/kernel/hostname")
+        .unwrap_or_else(|| "Unknown host".to_string());
 
     let (cpu_brand, cpu_count) = parse_cpuinfo();
     let (mem_total, mem_free, swap_total, swap_free) = parse_meminfo();
@@ -243,26 +228,31 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
     let (current_user, from_ip) = get_current_user_and_ip();
     let login_user_count = get_logged_in_user_count();
 
+    let virt_info = detect_virtualization();
+
     println!("{}", "Welcome!".bold().cyan());
     println!();
 
     let mut items = Vec::new();
 
-    // Show current time with timezone
     items.push((
         "Current time (TZ):",
         now_str_with_tz.bright_yellow().to_string(),
     ));
-
-    // Show system uptime
     items.push(("System uptime:", uptime_str.bright_yellow().to_string()));
-
-    let os_val = format!("{} {}", os_name, os_version)
-        .bright_yellow()
-        .to_string();
-    items.push(("Operating system:", os_val));
-
+    items.push((
+        "Operating system:",
+        format!("{} {}", os_name, os_version).bright_yellow().to_string(),
+    ));
     items.push(("Kernel version:", kernel_version.bright_green().to_string()));
+
+    if let Some(ref virt) = virt_info {
+        items.push((
+            "Virtualization:",
+            virt.bright_yellow().to_string(),
+        ));
+    }
+
     items.push(("Host name:", host_name.bright_yellow().to_string()));
 
     items.push((
@@ -278,7 +268,6 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
         "Memory used/total:",
         format!("{:.2}/{:.2} GB ({:.2}%)", used_gb, total_gb, used_percent),
     ));
-
     items.push((
         "Swap used/total:",
         format!(
@@ -289,13 +278,8 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
 
     items.push((
         "Current user:",
-        format!(
-            "{} (from {})",
-            current_user.bright_cyan(),
-            from_ip.bright_cyan()
-        ),
+        format!("{} (from {})", current_user.bright_cyan(), from_ip.bright_cyan()),
     ));
-
     items.push((
         "Login user count:",
         login_user_count.to_string().bright_cyan().to_string(),
@@ -312,12 +296,36 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
 
     println!();
 
-    // If farewell is empty or missing, use default
     let farewell_text = match cfg.farewell.as_deref() {
         Some(s) if !s.trim().is_empty() => s,
         _ => "Have a nice day!",
     };
     println!("{}", farewell_text.bold().cyan());
+}
+
+fn detect_virtualization() -> Option<String> {
+    if Path::new("/.dockerenv").exists() {
+        return Some("Docker".to_string());
+    }
+
+    if let Ok(content) = fs::read_to_string("/proc/1/cgroup") {
+        if content.contains("docker") {
+            return Some("Docker".to_string());
+        }
+        if content.contains("lxc") {
+            return Some("LXC".to_string());
+        }
+    }
+
+    if let Ok(output) = Command::new("systemd-detect-virt").output() {
+        if output.status.success() {
+            let virt_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if virt_str != "none" && !virt_str.is_empty() {
+                return Some(virt_str);
+            }
+        }
+    }
+    None
 }
 
 /// Reads and parses system uptime from /proc/uptime, returning a string like "2 days, 05:13:42".
@@ -531,7 +539,8 @@ fn print_aligned(items: &[(&str, String)]) {
 }
 
 #[cfg(unix)]
-/// Parses `/proc/mounts` and prints disk usage for root or NFS, automatically scaling to KB/MB/GB/TB/PB if needed.
+/// Parses `/proc/mounts` and prints disk usage for root or nfs, automatically
+/// scaling to KB/MB/GB/TB/PB if needed.
 fn parse_and_print_disk_usage() {
     let file = match File::open("/proc/mounts") {
         Ok(f) => f,
@@ -552,7 +561,7 @@ fn parse_and_print_disk_usage() {
         if mount_path == "/" {
             print_disk_usage(mount_path, "Disk usage (root):");
         } else if matches!(fstype, "nfs" | "nfs4") {
-            print_disk_usage(mount_path, "Disk usage (NFS):");
+            print_disk_usage(mount_path, "Disk usage (nfs):");
         }
     }
 }
