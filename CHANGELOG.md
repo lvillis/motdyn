@@ -2,11 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4] - 2024-12-28
+
+### 🚀 Features
+
+- Add virtualization detection
+
 ## [0.1.3] - 2024-12-27
 
 ### ⚙️ Miscellaneous Tasks
 
 - *(ci)* Update release.yaml
+- Release motdyn version 0.1.3
 
 ## [0.1.2] - 2024-12-27
 
