@@ -266,21 +266,18 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
 
     let virt_info = detect_virtualization();
 
-    #[cfg(unix)]
-    {
-        let main_iface = get_default_interface().unwrap_or_else(|| "unknown".to_string());
-        let main_ip = if main_iface == "unknown" {
-            "unknown".to_string()
-        } else {
-            get_interface_ipv4(&main_iface).unwrap_or_else(|| "unknown".to_string())
-        };
-    }
+
+    let main_iface = get_default_interface().unwrap_or_else(|| "unknown".to_string());
+    let main_ip = if main_iface == "unknown" {
+        "unknown".to_string()
+    } else {
+        get_interface_ipv4(&main_iface).unwrap_or_else(|| "unknown".to_string())
+    };
 
     let mut items = Vec::new();
 
     items.push(("Host name:", host_name.bright_yellow().to_string()));
 
-    #[cfg(unix)]
     items.push((
         "Main NIC:",
         format!("{} ({})", main_iface.bright_cyan(), main_ip.bright_cyan()),
