@@ -13,12 +13,15 @@ use libc::statvfs;
 use std::ffi::CString;
 #[cfg(unix)]
 use std::mem::MaybeUninit;
+use std::time::Duration;
+use reqwest::blocking::Client;
+use reqwest::Url;
 
 /// Represents the raw config loaded from `config.toml`.
 #[derive(Debug, serde::Deserialize)]
 struct RawConfig {
     /// Multi-line ASCII art string.
-    ascii_art: Option<String>,
+    welcome: Option<String>,
     /// Custom farewell text.
     farewell: Option<String>,
 }
@@ -27,7 +30,7 @@ struct RawConfig {
 #[derive(Debug, Default, Clone)]
 struct MotdConfig {
     /// ASCII art to display at the beginning.
-    ascii_art: Option<String>,
+    welcome: Option<String>,
     /// Farewell text to display at the end.
     farewell: Option<String>,
 }
@@ -169,7 +172,7 @@ fn load_config(path: &Path) -> Option<MotdConfig> {
     let raw: RawConfig = toml::from_str(&content).ok()?;
 
     Some(MotdConfig {
-        ascii_art: raw.ascii_art,
+        welcome: raw.welcome,
         farewell: raw.farewell,
     })
 }
@@ -178,8 +181,8 @@ fn load_config(path: &Path) -> Option<MotdConfig> {
 fn merge_config(sys_cfg: Option<MotdConfig>, usr_cfg: Option<MotdConfig>) -> MotdConfig {
     let mut final_cfg = sys_cfg.unwrap_or_default();
     if let Some(u) = usr_cfg {
-        if let Some(art) = u.ascii_art {
-            final_cfg.ascii_art = Some(art);
+        if let Some(art) = u.welcome {
+            final_cfg.welcome = Some(art);
         }
         if let Some(fw) = u.farewell {
             final_cfg.farewell = Some(fw);
@@ -201,12 +204,49 @@ fn expand_tilde(path_str: &str) -> PathBuf {
 
 /// Prints MOTD using the merged config, optionally showing verbose details.
 fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
-    // If there's ASCII art, print it first.
-    if let Some(ref art) = cfg.ascii_art {
-        println!();
-        println!("{}", art);
-        println!();
-    }
+    let welcome_str = if let Some(ref val) = cfg.welcome {
+        // Check if it's a valid URL
+        if let Ok(parsed_url) = Url::parse(val) {
+            // Try fetch in 1s
+            match Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+            {
+                Ok(client) => match client.get(parsed_url).send().and_then(|r| r.text()) {
+                    Ok(resp_text) => {
+                        let trimmed = resp_text.trim();
+                        if trimmed.is_empty() {
+                            "Welcome!".to_string()
+                        } else {
+                            resp_text
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to fetch welcome from '{}': {}", val, e);
+                        "Welcome!".to_string()
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to build reqwest client: {}", e);
+                    "Welcome!".to_string()
+                }
+            }
+        } else {
+            // Not a valid URL, just use it as raw text
+            if val.trim().is_empty() {
+                "Welcome!".to_string()
+            } else {
+                val.to_string()
+            }
+        }
+    } else {
+        // If there's no welcome at all, fallback
+        "Welcome!".to_string()
+    };
+    // Print the final welcome text
+    println!();
+    println!("{}", welcome_str);
+    println!();
 
     let (os_name, os_version) = get_os_info();
     let now = Local::now();
@@ -229,9 +269,6 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
     let login_user_count = get_logged_in_user_count();
 
     let virt_info = detect_virtualization();
-
-    println!("{}", "Welcome!".bold().cyan());
-    println!();
 
     let mut items = Vec::new();
 
