@@ -270,7 +270,31 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
 
     let virt_info = detect_virtualization();
 
+    let main_iface = get_default_interface().unwrap_or_else(|| "unknown".to_string());
+    let main_ip = if main_iface == "unknown" {
+        "unknown".to_string()
+    } else {
+        get_interface_ipv4(&main_iface).unwrap_or_else(|| "unknown".to_string())
+    };
+
     let mut items = Vec::new();
+
+    items.push(("Host name:", host_name.bright_yellow().to_string()));
+
+    items.push((
+        "Main NIC:",
+        format!("{} ({})", main_iface.bright_cyan(), main_ip.bright_cyan()),
+    ));
+
+    items.push((
+        "User info:",
+        format!(
+            "{} (from {}), {} user(s) logged in",
+            current_user.bright_cyan(),
+            from_ip.bright_cyan(),
+            login_user_count.to_string().bright_cyan()
+        ),
+    ));
 
     items.push((
         "Current time (TZ):",
@@ -289,8 +313,6 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
             virt.bright_yellow().to_string(),
         ));
     }
-
-    items.push(("Host name:", host_name.bright_yellow().to_string()));
 
     items.push((
         "CPU:",
@@ -311,15 +333,6 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
             "{:.2}/{:.2} GB ({:.2}%)",
             swap_used_gb, swap_total_gb, swap_ratio
         ),
-    ));
-
-    items.push((
-        "Current user:",
-        format!("{} (from {})", current_user.bright_cyan(), from_ip.bright_cyan()),
-    ));
-    items.push((
-        "Login user count:",
-        login_user_count.to_string().bright_cyan().to_string(),
     ));
 
     print_aligned(&items);
@@ -711,4 +724,55 @@ fn best_unit_scale(bytes: f64) -> (f64, &'static str) {
     } else {
         (1.0, "B")
     }
+}
+
+#[cfg(unix)]
+fn get_default_interface() -> Option<String> {
+    // Run: ip route show default
+    let output = std::process::Command::new("ip")
+        .arg("route")
+        .arg("show")
+        .arg("default")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Example line: "default via 192.168.1.1 dev eth0 proto static metric 100"
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() > 4 && parts[0] == "default" && parts[1] == "via" && parts[3] == "dev" {
+            return Some(parts[4].to_string()); // e.g. "eth0"
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn get_interface_ipv4(iface: &str) -> Option<String> {
+    // Run: ip -o -4 addr show dev <iface>
+    let output = std::process::Command::new("ip")
+        .args(["-o", "-4", "addr", "show", "dev", iface])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Example line: "2: eth0    inet 192.168.1.123/24 brd 192.168.1.255 scope global eth0"
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() > 3 && parts[2] == "inet" {
+            // parts[3] might be something like "192.168.1.123/24", so split off the /24
+            let ip_slash = parts[3];
+            let ip_only = ip_slash.split('/').next().unwrap_or("unknown");
+            return Some(ip_only.to_string());
+        }
+    }
+    None
 }
