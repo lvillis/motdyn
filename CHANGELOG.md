@@ -2,11 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.5] - 2024-12-29
+
+### 🚀 Features
+
+- Add ARM CPU implementer/part detection
+
 ## [0.1.4] - 2024-12-28
 
 ### 🚀 Features
 
 - Add virtualization detection
+
+### ⚙️ Miscellaneous Tasks
+
+- Release motdyn version 0.1.4
 
 ## [0.1.3] - 2024-12-27
 
