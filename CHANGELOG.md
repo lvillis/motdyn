@@ -2,11 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2024-12-29
+
+### 🚀 Features
+
+- Get main NIC info
+
 ## [0.1.6] - 2024-12-29
 
 ### 🚀 Features
 
 - Fetch welcome text from URL
+
+### ⚙️ Miscellaneous Tasks
+
+- Release motdyn version 0.1.6
 
 ## [0.1.5] - 2024-12-29
 
