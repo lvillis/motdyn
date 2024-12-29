@@ -41,12 +41,12 @@ Operating system:  Rocky Linux 9.5 (Blue Onyx)
 Kernel version:    5.14.0-503.15.1.el9_5.x86_64
 Host name:         localhost
 CPU:               AMD EPYC 7313 16-Core Processor (32 cores)
-Memory used/total: 39.21/46.77 GB (83.85%)
+Memory used/total: 100.67/127.77 GB (78.79%)
 Swap used/total:   0.00/0.00 GB (0.00%)
 Current user:      root (from 192.168.0.1)
 Login user count:  11
 Disk usage (root): / => 43.61 GB/98.40 GB (44.32%)
-Disk usage (NFS):  /mnt => 1.51 TB/1.97 TB (76.51%)
+Disk usage (nfs):  /mnt => 1.51 TB/1.97 TB (76.51%)
 
 Have a nice day!
 ```

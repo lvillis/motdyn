@@ -453,16 +453,48 @@ fn parse_cpuinfo() -> (String, usize) {
     let mut brand = "Unknown CPU".to_string();
     let mut core_count = 0;
 
+    // For ARM: 0x41 usually means ARM, 0x42 means Broadcom, etc.
+    let mut cpu_implementer = String::new();
+    let mut cpu_part = String::new();
+
     for line in reader.lines().flatten() {
+        // Count cores by counting "processor" lines
         if line.starts_with("processor") {
             core_count += 1;
-        } else if let Some(model_str) = line.strip_prefix("model name") {
+        }
+        // For x86, parse "model name"
+        else if let Some(model_str) = line.strip_prefix("model name") {
             let parts: Vec<_> = model_str.split(':').collect();
             if parts.len() > 1 && brand == "Unknown CPU" {
                 brand = parts[1].trim().to_string();
             }
         }
+        // For ARM, parse "CPU implementer" and "CPU part"
+        else if let Some(imp_str) = line.strip_prefix("CPU implementer") {
+            if let Some(val) = imp_str.split(':').nth(1) {
+                cpu_implementer = val.trim().to_lowercase();
+            }
+        } else if let Some(part_str) = line.strip_prefix("CPU part") {
+            if let Some(val) = part_str.split(':').nth(1) {
+                cpu_part = val.trim().to_lowercase();
+            }
+        }
     }
+
+    // If still unknown, guess based on implementer + part
+    if brand == "Unknown CPU" {
+        if cpu_implementer == "0x41" {
+            match cpu_part.as_str() {
+                "0xd03" => brand = "ARM Cortex-A53".to_string(),
+                "0xd07" => brand = "ARM Cortex-A57".to_string(),
+                "0xd08" => brand = "ARM Cortex-A72".to_string(),
+                _ => brand = format!("ARM CPU (part={}, implementer=0x41)", cpu_part),
+            }
+        } else if !cpu_implementer.is_empty() {
+            brand = format!("ARM CPU (part={}, implementer={})", cpu_part, cpu_implementer);
+        }
+    }
+
     (brand, core_count)
 }
 
