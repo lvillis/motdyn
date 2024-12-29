@@ -725,7 +725,6 @@ fn best_unit_scale(bytes: f64) -> (f64, &'static str) {
     }
 }
 
-#[cfg(unix)]
 fn get_default_interface() -> Option<String> {
     // Run: ip route show default
     let output = std::process::Command::new("ip")
@@ -750,7 +749,6 @@ fn get_default_interface() -> Option<String> {
     None
 }
 
-#[cfg(unix)]
 fn get_interface_ipv4(iface: &str) -> Option<String> {
     // Run: ip -o -4 addr show dev <iface>
     let output = std::process::Command::new("ip")
