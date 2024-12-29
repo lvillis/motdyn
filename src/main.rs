@@ -1,21 +1,20 @@
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use colored::*;
-use std::env;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
 #[cfg(unix)]
 use libc::statvfs;
-#[cfg(unix)]
-use std::ffi::CString;
-#[cfg(unix)]
-use std::mem::MaybeUninit;
-use std::time::Duration;
 use reqwest::blocking::Client;
 use reqwest::Url;
+use std::env;
+#[cfg(unix)]
+use std::ffi::CString;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::mem::MaybeUninit;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
 /// Represents the raw config loaded from `config.toml`.
 #[derive(Debug, serde::Deserialize)]
@@ -99,7 +98,7 @@ fn do_install() -> Result<(), Box<dyn std::error::Error>> {
             "Directory '{}' not found, cannot install system-wide script.",
             profile_dir
         )
-            .into());
+        .into());
     }
 
     let script_path = format!("{}/motdyn.sh", profile_dir);
@@ -208,10 +207,7 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
         // Check if it's a valid URL
         if let Ok(parsed_url) = Url::parse(val) {
             // Try fetch in 1s
-            match Client::builder()
-                .timeout(Duration::from_secs(1))
-                .build()
-            {
+            match Client::builder().timeout(Duration::from_secs(1)).build() {
                 Ok(client) => match client.get(parsed_url).send().and_then(|r| r.text()) {
                     Ok(resp_text) => {
                         let trimmed = resp_text.trim();
@@ -257,8 +253,8 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
 
     let kernel_version = read_first_line("/proc/sys/kernel/osrelease")
         .unwrap_or_else(|| "Unknown kernel".to_string());
-    let host_name = read_first_line("/proc/sys/kernel/hostname")
-        .unwrap_or_else(|| "Unknown host".to_string());
+    let host_name =
+        read_first_line("/proc/sys/kernel/hostname").unwrap_or_else(|| "Unknown host".to_string());
 
     let (cpu_brand, cpu_count) = parse_cpuinfo();
     let (mem_total, mem_free, swap_total, swap_free) = parse_meminfo();
@@ -270,17 +266,21 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
 
     let virt_info = detect_virtualization();
 
-    let main_iface = get_default_interface().unwrap_or_else(|| "unknown".to_string());
-    let main_ip = if main_iface == "unknown" {
-        "unknown".to_string()
-    } else {
-        get_interface_ipv4(&main_iface).unwrap_or_else(|| "unknown".to_string())
-    };
+    #[cfg(unix)]
+    {
+        let main_iface = get_default_interface().unwrap_or_else(|| "unknown".to_string());
+        let main_ip = if main_iface == "unknown" {
+            "unknown".to_string()
+        } else {
+            get_interface_ipv4(&main_iface).unwrap_or_else(|| "unknown".to_string())
+        };
+    }
 
     let mut items = Vec::new();
 
     items.push(("Host name:", host_name.bright_yellow().to_string()));
 
+    #[cfg(unix)]
     items.push((
         "Main NIC:",
         format!("{} ({})", main_iface.bright_cyan(), main_ip.bright_cyan()),
@@ -303,15 +303,14 @@ fn print_motdyn(verbose: bool, cfg: &MotdConfig) {
     items.push(("System uptime:", uptime_str.bright_yellow().to_string()));
     items.push((
         "Operating system:",
-        format!("{} {}", os_name, os_version).bright_yellow().to_string(),
+        format!("{} {}", os_name, os_version)
+            .bright_yellow()
+            .to_string(),
     ));
     items.push(("Kernel version:", kernel_version.bright_green().to_string()));
 
     if let Some(ref virt) = virt_info {
-        items.push((
-            "Virtualization:",
-            virt.bright_yellow().to_string(),
-        ));
+        items.push(("Virtualization:", virt.bright_yellow().to_string()));
     }
 
     items.push((
@@ -541,7 +540,10 @@ fn parse_cpuinfo() -> (String, usize) {
                 _ => brand = format!("ARM CPU (part={}, implementer=0x41)", cpu_part),
             }
         } else if !cpu_implementer.is_empty() {
-            brand = format!("ARM CPU (part={}, implementer={})", cpu_part, cpu_implementer);
+            brand = format!(
+                "ARM CPU (part={}, implementer={})",
+                cpu_part, cpu_implementer
+            );
         }
     }
 
