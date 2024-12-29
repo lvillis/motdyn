@@ -2,11 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.2] - 2024-12-29
+
+### 🐛 Bug Fixes
+
+- Typo
+
 ## [1.0.1] - 2024-12-29
 
 ### ⚙️ Miscellaneous Tasks
 
 - Cargo fmt
+- Release motdyn version 1.0.1
 
 ## [1.0.0] - 2024-12-29
 
