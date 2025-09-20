@@ -1,3 +1,8 @@
+## [1.0.4] - 2025-09-20
+
+### ⚙️ Miscellaneous Tasks
+
+- Update ci
 ## [1.0.3] - 2025-09-20
 
 ### 🚀 Features
@@ -7,6 +12,10 @@
 ### 🐛 Bug Fixes
 
 - Typo
+
+### ⚙️ Miscellaneous Tasks
+
+- Release motdyn version 1.0.3
 ## [1.0.2] - 2024-12-29
 
 ### 🚀 Features
