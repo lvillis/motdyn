@@ -1,6 +1,6 @@
-﻿[package]
+[package]
 name = "motdyn"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 description = "🛠️ motdyn (Dynamic MOTD): Rust-powered and highly configurable for real-time login insights."
 license = "MIT"
