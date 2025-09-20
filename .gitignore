@@ -9,3 +9,4 @@ logs/
 **/*.rs.bk
 
 Cargo.lock
+AGENTS.md

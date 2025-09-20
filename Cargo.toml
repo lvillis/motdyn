@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "motdyn"
 version = "1.0.2"
 edition = "2021"
@@ -9,27 +9,40 @@ repository = "https://github.com/lvillis/motdyn"
 homepage = "https://github.com/lvillis/motdyn"
 documentation = "https://github.com/lvillis/motdyn/blob/main/README.md"
 exclude = [
-    "/docs/",
-    "/tests/",
-    "/.config/",
-    "/.github/",
-    "/.justfile",
-    "/rust-toolchain.toml",
-    "/.gitignore",
+  "/docs/",
+  "/tests/",
+  "/.config/",
+  "/.github/",
+  "/.justfile",
+  "/rust-toolchain.toml",
+  "/.gitignore",
 ]
 
 [dependencies]
-clap = { version = "4.5.23", features = ["derive"] }
-chrono = "0.4"
-colored = "3.0"
-libc = "0.2.169"
-toml = "0.9.1"
-serde = { version = "1.0.216", features = ["derive"] }
-reqwest = { version = "0.12.9", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+clap = { version = "4.5.48", features = ["derive"] }
+chrono = { version = "0.4.42" }
+colored = { version = "3.0.0" }
+libc = { version = "0.2.175" }
+toml = { version = "0.9.7" }
+serde = { version = "1.0.225", features = ["derive"] }
+reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[dev-dependencies]
+tempfile = { version = "3.22.0" }
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev.package."*"]
+opt-level = 1
 
 [package.metadata.release]
 tag-prefix = ""
 tag-name = "{{prefix}}{{version}}"
 pre-release-commit-message = "chore: release {{crate_name}} version {{version}}"
 tag-message = "chore: release {{crate_name}} version {{version}}"
-pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}" ]
+pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
