@@ -25,7 +25,7 @@ colored = { version = "3.0.0" }
 libc = { version = "0.2.175" }
 toml = { version = "0.9.7" }
 serde = { version = "1.0.225", features = ["derive"] }
-reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [dev-dependencies]
 tempfile = { version = "3.22.0" }
