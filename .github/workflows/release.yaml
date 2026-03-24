@@ -1,146 +1,196 @@
-name: release
+name: Release
 
 on:
   push:
     tags:
-      - '*'
+      - "*.*.*"
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
+  CARGO_TERM_COLOR: always
   PROJECT: motdyn
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          tag="${GITHUB_REF_NAME}"
+
+          if [[ -z "${version}" ]]; then
+            echo "Failed to read package version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          if [[ "${tag}" != "${version}" ]]; then
+            echo "Release tag ${tag} does not match package version ${version}" >&2
+            exit 1
+          fi
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-verify-${{ runner.os }}-1.94.0
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
   build:
+    needs: verify
     name: build-${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            use-cross: false
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            use-cross: true
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            use-cross: true
+          - target: x86_64-unknown-linux-gnu
+            builder: cargo
+          - target: x86_64-unknown-linux-musl
+            builder: cargo-musl
+          - target: aarch64-unknown-linux-musl
+            builder: cross
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
-      - name: Set version
-        id: version
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          echo "PROJECT_VERSION=${VERSION}" >> "$GITHUB_ENV"
-          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.94.0
           targets: ${{ matrix.target }}
 
-      - name: Setup native compilation
-        if: ${{ matrix.use-cross == false }}
-        shell: bash
-        run: echo "CARGO=cargo" >> "$GITHUB_ENV"
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}-1.94.0
 
-      - name: Setup cross compilation
-        if: ${{ matrix.use-cross == true }}
+      - name: Install musl tooling
+        if: ${{ matrix.builder == 'cargo-musl' }}
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - name: Install cross
+        if: ${{ matrix.builder == 'cross' }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build binary
         shell: bash
         run: |
-          dir="$RUNNER_TEMP/cross"
-          mkdir -p "$dir"
-          echo "$dir" >> "$GITHUB_PATH"
-          cd "$dir"
-          curl -LSf -o cross.tar.gz https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz
-          tar xf cross.tar.gz
-          echo "CARGO=cross" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=--cfg ${{ env.PROJECT }}" >> "$GITHUB_ENV"
-          echo "TARGET_DIR=./target/${{ matrix.target }}" >> "$GITHUB_ENV"
+          set -euo pipefail
 
-      - name: Build
+          case "${{ matrix.builder }}" in
+            cargo)
+              cargo build --release --locked --target "${{ matrix.target }}"
+              ;;
+            cargo-musl)
+              CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked --target "${{ matrix.target }}"
+              ;;
+            cross)
+              cross build --release --locked --target "${{ matrix.target }}"
+              ;;
+            *)
+              echo "Unsupported builder: ${{ matrix.builder }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Package artifact
         shell: bash
         run: |
-          : "${CARGO:=cargo}"
-          $CARGO build --release --target ${{ matrix.target }}
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            echo "BIN_NAME=${{ env.PROJECT }}.exe" >> "$GITHUB_ENV"
-          else
-            echo "BIN_NAME=${{ env.PROJECT }}" >> "$GITHUB_ENV"
-          fi
+          set -euo pipefail
 
-      - name: Package
-        shell: bash
-        run: |
-          staging="${{ env.PROJECT }}-${{ env.PROJECT_VERSION }}-${{ matrix.target }}"
-          mkdir "$staging"
-          cp README.md LICENSE "$staging/"
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}" "$staging/"
-            7z a "$staging.zip" "$staging" >/dev/null
-            echo "ASSET=$staging.zip" >> "$GITHUB_ENV"
-          else
-            cp "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}" "$staging/"
-            tar czf "$staging.tar.gz" "$staging"
-            echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
-          fi
+          staging="${PROJECT}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "${staging}"
+          cp README.md LICENSE "${staging}/"
+          cp "target/${{ matrix.target }}/release/${PROJECT}" "${staging}/"
+          tar czf "${staging}.tar.gz" "${staging}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: ${{ env.ASSET }}
+          path: ${{ env.PROJECT }}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          compression-level: 0
+          if-no-files-found: error
 
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
-      - name: Set version
-        id: version
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "PROJECT_VERSION=${VERSION}" >> "$GITHUB_ENV"
 
       - name: Download artifacts
         uses: actions/download-artifact@v5
         with:
           path: dist
 
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -maxdepth 2 -type f -name '*.tar.gz' -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > dist/SHA256SUMS.txt
+
       - name: Generate changelog
         uses: orhun/git-cliff-action@v4
-        id: cliff
         with:
-          config: cliff.toml
-          args: --latest --tag ${{ steps.version.outputs.VERSION }} --strip header
+          args: --latest --tag ${{ github.ref_name }} --strip header
         env:
           OUTPUT: RELEASE_NOTES.md
 
       - name: Create or update GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          tag="${{ steps.version.outputs.VERSION }}"
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
           title="motdyn ${tag}"
-          assets=$(find dist -type f -maxdepth 2)
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" $assets --clobber
-            gh release edit "$tag" --title "$title" --notes-file RELEASE_NOTES.md
+          mapfile -d '' assets < <(
+            find dist -maxdepth 2 -type f \( -name '*.tar.gz' -o -name 'SHA256SUMS.txt' \) -print0 | sort -z
+          )
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${assets[@]}" --clobber
+            gh release edit "${tag}" --title "${title}" --notes-file RELEASE_NOTES.md
           else
-            gh release create "$tag" $assets --title "$title" --notes-file RELEASE_NOTES.md
+            gh release create "${tag}" "${assets[@]}" --title "${title}" --notes-file RELEASE_NOTES.md
           fi

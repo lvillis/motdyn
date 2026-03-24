@@ -2,47 +2,53 @@
 name = "motdyn"
 version = "1.0.4"
 edition = "2021"
-description = "🛠️ motdyn (Dynamic MOTD): Rust-powered and highly configurable for real-time login insights."
+description = "Dynamic MOTD CLI for Linux login sessions."
 license = "MIT"
 authors = ["lvillis<lvillis@outlook.com>"]
 repository = "https://github.com/lvillis/motdyn"
 homepage = "https://github.com/lvillis/motdyn"
 documentation = "https://github.com/lvillis/motdyn/blob/main/README.md"
-exclude = [
-  "/docs/",
-  "/tests/",
-  "/.config/",
-  "/.github/",
-  "/.justfile",
-  "/rust-toolchain.toml",
-  "/.gitignore",
+include = [
+  "src/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "README.md",
+  "LICENSE",
+  "CHANGELOG.md",
 ]
 
 [dependencies]
-clap = { version = "4.5.48", features = ["derive"] }
-chrono = { version = "0.4.42" }
-colored = { version = "3.0.0" }
-libc = { version = "0.2.175" }
-toml = { version = "0.9.7" }
-serde = { version = "1.0.225", features = ["derive"] }
-reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+clap = { version = "4.6.0", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+colored = { version = "3.1.1", default-features = false }
+libc = { version = "0.2.183", default-features = false }
+toml = { version = "0.9.7", default-features = false, features = ["parse", "serde"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
+reqx = { version = "0.1.29", default-features = false, features = ["blocking-tls-rustls-ring"] }
+url = { version = "2.5.8", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-tempfile = { version = "3.22.0" }
+tempfile = { version = "3.27.0", default-features = false, features = ["getrandom"] }
 
 [profile.release]
-opt-level = "z"
-lto = "thin"
 codegen-units = 1
-strip = true
+lto = "fat"
+opt-level = "z"
 panic = "abort"
+strip = "symbols"
 
 [profile.dev.package."*"]
 opt-level = 1
 
 [package.metadata.release]
+push = true
+publish = false
+verify = true
+sign-commit = true
+sign-tag = true
+allow-branch = ["main"]
 tag-prefix = ""
 tag-name = "{{prefix}}{{version}}"
-pre-release-commit-message = "chore: release {{crate_name}} version {{version}}"
 tag-message = "chore: release {{crate_name}} version {{version}}"
-pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
+pre-release-commit-message = "chore: release {{crate_name}} version {{version}}"
+pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}" ]

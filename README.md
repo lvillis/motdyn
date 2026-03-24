@@ -1,66 +1,218 @@
 <div align=right>Table of Contents↗️</div>
 
-<h1 align=center><code>motdyn</code></h1>
+<div align="center">
+  <h1><code>motdyn</code></h1>
+  <p><strong>Dynamic MOTD CLI for Linux login sessions.</strong></p>
 
-<p align=center>🛠️ motdyn (Dynamic MOTD): Rust-powered and highly configurable for real-time login insights.</p>
-
-<div align=center>
-  <a href="https://crates.io/crates/motdyn">
-    <img src="https://img.shields.io/crates/v/motdyn.svg" alt="crates.io version">
-  </a>
-  <a href="https://crates.io/crates/motdyn">
-    <img src="https://img.shields.io/github/repo-size/lvillis/motdyn?style=flat-square&color=328657" alt="crates.io version">
-  </a>
-  <a href="https://github.com/lvillis/motdyn/actions">
-    <img src="https://github.com/lvillis/motdyn/actions/workflows/ci.yaml/badge.svg" alt="build status">
-  </a>
-  <a href="https://hub.docker.com/r/lvillis/motdyn">
-    <img src="https://img.shields.io/docker/pulls/lvillis/motdyn?style=flat-square" alt="docker pulls">
-  </a>
-  <a href="https://hub.docker.com/r/lvillis/motdyn">
-    <img src="https://img.shields.io/docker/image-size/lvillis/motdyn/latest?style=flat-square" alt="image size">
-  </a>
-  <a href="mailto:lvillis@outlook.com?subject=Thanks%20for%20motdyn!">
-    <img src="https://img.shields.io/badge/Say%20Thanks-!-1EAEDB.svg" alt="say thanks">
-  </a>
-
+  <p>
+    <a href="https://crates.io/crates/motdyn">
+      <img src="https://img.shields.io/crates/v/motdyn.svg" alt="crates.io version">
+    </a>
+    <a href="https://github.com/lvillis/motdyn">
+      <img src="https://img.shields.io/github/repo-size/lvillis/motdyn?style=flat-square&color=328657" alt="repository size">
+    </a>
+    <a href="https://github.com/lvillis/motdyn/actions">
+      <img src="https://github.com/lvillis/motdyn/actions/workflows/ci.yaml/badge.svg" alt="build status">
+    </a>
+    <a href="https://hub.docker.com/r/lvillis/motdyn">
+      <img src="https://img.shields.io/docker/pulls/lvillis/motdyn?style=flat-square" alt="docker pulls">
+    </a>
+    <a href="https://hub.docker.com/r/lvillis/motdyn">
+      <img src="https://img.shields.io/docker/image-size/lvillis/motdyn/latest?style=flat-square" alt="image size">
+    </a>
+  </p>
 </div>
 
----
+`motdyn` prints a concise snapshot of the current host state when a user opens a shell. It is built for Linux SSH and login-shell workflows where fast context matters more than dashboards or long-term monitoring.
 
-## Example
+## Quick Start
+
+Install from crates.io:
+
+```bash
+cargo install motdyn
+```
+
+Run once:
+
+```bash
+motdyn
+```
+
+Install for login shells:
+
+```bash
+sudo motdyn install
+motdyn install --user
+```
+
+Check status:
+
+```bash
+motdyn status
+motdyn status --user
+```
+
+## What It Shows
+
+Depending on the environment and configured module order, `motdyn` can print:
+
+- current time and timezone
+- system uptime
+- operating system and kernel
+- host name
+- CPU, memory, and swap usage
+- current user, source IP, and logged-in user count
+- main network interface and IPv4 address
+- root and NFS filesystem usage
+- virtualization or container information
+
+## Installation
+
+### Cargo
+
+```bash
+cargo install motdyn
+```
+
+### Docker
+
+```bash
+docker build -t motdyn .
+docker run --rm motdyn --help
+```
+
+### Login Hooks
+
+System-wide install writes:
+
+```text
+/etc/profile.d/motdyn.sh
+```
+
+User install always manages:
+
+```text
+~/.profile
+```
+
+If they already exist, user install also updates:
+
+- `~/.bash_profile`
+- `~/.bash_login`
+- `~/.zprofile`
+
+Remove hooks with:
+
+```bash
+sudo motdyn uninstall
+motdyn uninstall --user
+```
+
+## Usage
+
+```bash
+motdyn [OPTIONS] [COMMAND]
+```
+
+Commands:
+
+- `install`
+- `uninstall`
+- `status`
+
+Global options:
+
+- `-v`, `--verbose`
+
+Without a subcommand, `motdyn` prints the current MOTD immediately.
+
+## Configuration
+
+System config:
+
+```text
+/etc/motdyn/config.toml
+```
+
+User config:
+
+```text
+~/.config/motdyn/config.toml
+```
+
+User config overrides system config.
+
+Example:
+
+```toml
+welcome = "https://example.com/motd.txt"
+farewell = "Have a nice day!"
+modules = ["host", "network", "user", "time", "uptime", "os", "kernel", "virtualization", "cpu", "memory", "swap", "disk"]
+
+[remote_welcome]
+enabled = true
+timeout_ms = 1000
+cache_ttl_secs = 300
+cache_path = "~/.cache/motdyn/welcome.txt"
+follow_redirects = true
+allow_http = false
+```
+
+Supported module names:
+
+- `host`
+- `network`
+- `user`
+- `time`
+- `uptime`
+- `os`
+- `kernel`
+- `virtualization`
+- `cpu`
+- `memory`
+- `swap`
+- `disk`
+
+Notes:
+
+- `welcome` may be a literal string or a URL.
+- if `modules` is omitted, the default built-in order is used.
+- if `modules` is an empty list, only the welcome and farewell text are shown.
+- remote welcome uses a local cache and falls back to stale cache or default text on failure.
+- `--verbose` shows config loading, module resolution, welcome source, cache state, and external command availability.
+
+## Example Output
 
 ```shell
 $ motdyn
 
 Welcome!
 
-Current time (TZ): 2024-12-27 22:36:25 +00:00
-System uptime:     80 days, 05:13:42
-Operating system:  Rocky Linux 9.5 (Blue Onyx)
+Host name:         prod-hpc-01
+Main NIC:          bond0 (10.10.8.24)
+User info:         admin (from 10.10.1.15), 4 user(s) logged in
+Current time (TZ): 2026-01-15 09:30:00 +00:00
+System uptime:     24 days, 18:42:11
+Operating system:  Rocky Linux 9.5
 Kernel version:    5.14.0-503.15.1.el9_5.x86_64
-Host name:         localhost
-CPU:               AMD EPYC 7313 16-Core Processor (32 cores)
-Memory used/total: 100.67/127.77 GB (78.79%)
-Swap used/total:   0.00/0.00 GB (0.00%)
-Current user:      root (from 192.168.0.1)
-Login user count:  11
-Disk usage (root): / => 43.61 GB/98.40 GB (44.32%)
-Disk usage (nfs):  /mnt => 1.51 TB/1.97 TB (76.51%)
+Virtualization:    kvm
+CPU:               2x AMD EPYC 9654 (192 cores)
+Memory used/total: 384.00/1536.00 GB (25.00%)
+Swap used/total:   0.00/64.00 GB (0.00%)
+Disk usage (root): / => 1.20 TB/7.68 TB (15.62%)
 
 Have a nice day!
 ```
 
-## Usage
+## Compatibility
 
-```bash
-motdyn [subcommand] [options]
-```
+`motdyn` is Linux-oriented and works best in environments with:
 
-Where:
+- `/proc`
+- `ip`
+- `/etc/profile.d`
+- `systemd-detect-virt` (optional)
+- a working `utmpx` implementation for session counting
 
-- `install` places a script (/etc/profile.d/motdyn.sh) to run motdyn on login (root privileges).
-- `uninstall` removes that script, stopping MOTD from running automatically.
-- `status` checks if the script is currently installed.
-- (no subcommand) prints the dynamic MOTD immediately.
-- -v, --verbose shows additional details.
+Some fields may degrade to `unknown` on minimal systems or containers.

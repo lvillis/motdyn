@@ -2,29 +2,80 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths-ignore:
-      - 'Dockerfile'
-      - 'CHANGELOG.md'
-      - 'README.md'
+      - "CHANGELOG.md"
+      - "LICENSE"
+      - "README.md"
   pull_request:
-    branches: [ main ]
+    branches: [main]
+    paths-ignore:
+      - "CHANGELOG.md"
+      - "LICENSE"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  fmt:
+    name: fmt
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v5
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
+          toolchain: 1.94.0
+          components: rustfmt
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-1.94.0
+      - name: Check formatting
+        run: cargo fmt --all --check
 
-      - name: Build
-        run: cargo build --verbose
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: clippy
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-1.94.0
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
 
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-1.94.0
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --locked
+      - name: Smoke test CLI help
+        run: |
+          cargo run --locked -- --help >/dev/null
+          cargo run --locked -- status --help >/dev/null
