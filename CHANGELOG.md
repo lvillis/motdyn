@@ -1,8 +1,18 @@
+## [1.0.6] - 2026-03-24
+
+### ⚙️ Miscellaneous Tasks
+
+- Update .justfile
+- Update .gitignore
 ## [1.0.5] - 2026-03-24
 
 ### 🚀 Features
 
 - Overhaul motdyn runtime
+
+### ⚙️ Miscellaneous Tasks
+
+- Release motdyn version 1.0.5
 ## [1.0.4] - 2025-09-20
 
 ### ⚙️ Miscellaneous Tasks
