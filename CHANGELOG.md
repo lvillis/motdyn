@@ -1,8 +1,17 @@
+## [1.0.8] - 2026-03-24
+
+### 🐛 Bug Fixes
+
+- Ci
 ## [1.0.7] - 2026-03-24
 
 ### 🐛 Bug Fixes
 
 - Improve session counting
+
+### ⚙️ Miscellaneous Tasks
+
+- Release motdyn version 1.0.7
 ## [1.0.6] - 2026-03-24
 
 ### ⚙️ Miscellaneous Tasks
