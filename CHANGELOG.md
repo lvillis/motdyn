@@ -1,8 +1,14 @@
+## [1.0.5] - 2026-03-24
+
+### 🚀 Features
+
+- Overhaul motdyn runtime
 ## [1.0.4] - 2025-09-20
 
 ### ⚙️ Miscellaneous Tasks
 
 - Update ci
+- Release motdyn version 1.0.4
 ## [1.0.3] - 2025-09-20
 
 ### 🚀 Features
