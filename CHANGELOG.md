@@ -1,9 +1,15 @@
+## [1.0.7] - 2026-03-24
+
+### 🐛 Bug Fixes
+
+- Improve session counting
 ## [1.0.6] - 2026-03-24
 
 ### ⚙️ Miscellaneous Tasks
 
 - Update .justfile
 - Update .gitignore
+- Release motdyn version 1.0.6
 ## [1.0.5] - 2026-03-24
 
 ### 🚀 Features
