@@ -1190,7 +1190,7 @@ fn count_logged_in_users_from_linux_utmp_file(path: &Path) -> Option<usize> {
         match file.read_exact(buffer) {
             Ok(()) => {
                 let record = unsafe { record.assume_init() };
-                if record.ut_type == USER_PROCESS as i16 && record.ut_user[0] != 0 {
+                if record.ut_type == USER_PROCESS && record.ut_user[0] != 0 {
                     count += 1;
                 }
             }
@@ -1641,10 +1641,10 @@ mod tests {
         let path = dir.path().join("utmp");
         let mut file = File::create(&path).unwrap();
 
-        write_linux_utmp_record(&mut file, USER_PROCESS as i16, "alice");
-        write_linux_utmp_record(&mut file, USER_PROCESS as i16, "");
+        write_linux_utmp_record(&mut file, USER_PROCESS, "alice");
+        write_linux_utmp_record(&mut file, USER_PROCESS, "");
         write_linux_utmp_record(&mut file, 8, "");
-        write_linux_utmp_record(&mut file, USER_PROCESS as i16, "root");
+        write_linux_utmp_record(&mut file, USER_PROCESS, "root");
 
         assert_eq!(count_logged_in_users_from_linux_utmp_file(&path), Some(2));
     }
