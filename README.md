@@ -213,6 +213,6 @@ Have a nice day!
 - `ip`
 - `/etc/profile.d`
 - `systemd-detect-virt` (optional)
-- a working `utmpx` implementation for session counting
+- Linux `utmp` session records for login user counting
 
 Some fields may degrade to `unknown` on minimal systems or containers.

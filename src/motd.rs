@@ -5,7 +5,7 @@ use reqx::prelude::RedirectPolicy;
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,6 +19,36 @@ use libc::{endutxent, getutxent, setutxent, statvfs, USER_PROCESS};
 use std::ffi::CString;
 #[cfg(unix)]
 use std::mem::MaybeUninit;
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LinuxUtmpExitStatus {
+    e_termination: i16,
+    e_exit: i16,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LinuxUtmpTimeVal32 {
+    tv_sec: i32,
+    tv_usec: i32,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LinuxUtmpRecord {
+    ut_type: i16,
+    ut_pid: i32,
+    ut_line: [u8; 32],
+    ut_id: [u8; 4],
+    ut_user: [u8; 32],
+    ut_host: [u8; 256],
+    ut_exit: LinuxUtmpExitStatus,
+    ut_session: i32,
+    ut_tv: LinuxUtmpTimeVal32,
+    ut_addr_v6: [i32; 4],
+    __unused: [u8; 20],
+}
 
 const DEFAULT_WELCOME: &str = "Welcome!";
 const DEFAULT_FAREWELL: &str = "Have a nice day!";
@@ -1098,8 +1128,23 @@ fn get_current_user_and_ip() -> (String, String) {
     (user, from_ip)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn get_logged_in_user_count() -> usize {
+    count_logged_in_users_from_linux_utmp().unwrap_or_else(get_logged_in_user_count_via_libc)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn get_logged_in_user_count() -> usize {
+    get_logged_in_user_count_via_libc()
+}
+
+#[cfg(not(unix))]
+fn get_logged_in_user_count() -> usize {
+    0
+}
+
+#[cfg(unix)]
+fn get_logged_in_user_count_via_libc() -> usize {
     let mut count = 0;
 
     unsafe {
@@ -1121,9 +1166,40 @@ fn get_logged_in_user_count() -> usize {
     count
 }
 
-#[cfg(not(unix))]
-fn get_logged_in_user_count() -> usize {
-    0
+#[cfg(target_os = "linux")]
+fn count_logged_in_users_from_linux_utmp() -> Option<usize> {
+    ["/run/utmp", "/var/run/utmp"]
+        .into_iter()
+        .find_map(|path| count_logged_in_users_from_linux_utmp_file(Path::new(path)))
+}
+
+#[cfg(target_os = "linux")]
+fn count_logged_in_users_from_linux_utmp_file(path: &Path) -> Option<usize> {
+    let mut file = File::open(path).ok()?;
+    let mut count = 0;
+
+    loop {
+        let mut record = MaybeUninit::<LinuxUtmpRecord>::zeroed();
+        let buffer = unsafe {
+            std::slice::from_raw_parts_mut(
+                record.as_mut_ptr().cast::<u8>(),
+                std::mem::size_of::<LinuxUtmpRecord>(),
+            )
+        };
+
+        match file.read_exact(buffer) {
+            Ok(()) => {
+                let record = unsafe { record.assume_init() };
+                if record.ut_type == USER_PROCESS as i16 && record.ut_user[0] != 0 {
+                    count += 1;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(_) => return None,
+        }
+    }
+
+    Some(count)
 }
 
 fn to_gb_and_ratio(total_kb: u64, free_kb: u64) -> (f64, f64, f64) {
@@ -1558,11 +1634,61 @@ mod tests {
             .any(|warning| warning.contains("HTTP 404")));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn count_logged_in_users_from_linux_utmp_file_counts_user_process_records() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("utmp");
+        let mut file = File::create(&path).unwrap();
+
+        write_linux_utmp_record(&mut file, USER_PROCESS as i16, "alice");
+        write_linux_utmp_record(&mut file, USER_PROCESS as i16, "");
+        write_linux_utmp_record(&mut file, 8, "");
+        write_linux_utmp_record(&mut file, USER_PROCESS as i16, "root");
+
+        assert_eq!(count_logged_in_users_from_linux_utmp_file(&path), Some(2));
+    }
+
     #[test]
     fn to_gb_and_ratio_handles_zero_total() {
         let (used, total, ratio) = to_gb_and_ratio(0, 0);
         assert_eq!(used, 0.0);
         assert_eq!(total, 0.0);
         assert_eq!(ratio, 0.0);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_linux_utmp_record(file: &mut File, ut_type: i16, user: &str) {
+        let mut record = LinuxUtmpRecord {
+            ut_type,
+            ut_pid: 0,
+            ut_line: [0; 32],
+            ut_id: [0; 4],
+            ut_user: [0; 32],
+            ut_host: [0; 256],
+            ut_exit: LinuxUtmpExitStatus {
+                e_termination: 0,
+                e_exit: 0,
+            },
+            ut_session: 0,
+            ut_tv: LinuxUtmpTimeVal32 {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            ut_addr_v6: [0; 4],
+            __unused: [0; 20],
+        };
+
+        for (slot, byte) in record.ut_user.iter_mut().zip(user.bytes()) {
+            *slot = byte;
+        }
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&record as *const LinuxUtmpRecord).cast::<u8>(),
+                std::mem::size_of::<LinuxUtmpRecord>(),
+            )
+        };
+        file.write_all(bytes).unwrap();
     }
 }
