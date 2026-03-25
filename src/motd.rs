@@ -929,11 +929,8 @@ fn detect_virtualization() -> Option<String> {
     }
 
     if let Ok(content) = fs::read_to_string("/proc/1/cgroup") {
-        if content.contains("docker") {
-            return Some("Docker".to_string());
-        }
-        if content.contains("lxc") {
-            return Some("LXC".to_string());
+        if let Some(value) = detect_virtualization_from_cgroup(&content) {
+            return Some(value);
         }
     }
 
@@ -950,10 +947,7 @@ fn detect_virtualization() -> Option<String> {
 
 fn parse_uptime() -> Option<String> {
     let line = std::fs::read_to_string("/proc/uptime").ok()?;
-    let parts: Vec<_> = line.split_whitespace().collect();
-    let total_seconds = parts.first()?.parse::<f64>().ok()? as u64;
-
-    Some(format_uptime(total_seconds))
+    parse_uptime_content(&line)
 }
 
 fn format_uptime(mut secs: u64) -> String {
@@ -984,16 +978,15 @@ fn get_os_info() -> (String, String) {
 
 fn parse_redhat_release() -> Option<(String, String)> {
     let content = fs::read_to_string("/etc/redhat-release").ok()?;
-    let line = content.trim();
-    let needle = " release ";
-    let pos = line.find(needle)?;
-    let os_name = &line[..pos];
-    let ver_str = &line[pos + needle.len()..];
-    Some((os_name.to_string(), ver_str.to_string()))
+    parse_redhat_release_content(&content)
 }
 
 fn parse_os_release() -> Option<(String, String)> {
     let content = fs::read_to_string("/etc/os-release").ok()?;
+    parse_os_release_content(&content)
+}
+
+fn parse_os_release_content(content: &str) -> Option<(String, String)> {
     let mut os_name: Option<String> = None;
     let mut os_version: Option<String> = None;
 
@@ -1011,62 +1004,23 @@ fn parse_os_release() -> Option<(String, String)> {
 }
 
 fn parse_meminfo() -> (u64, u64, u64, u64) {
-    let file = match File::open("/proc/meminfo") {
-        Ok(f) => f,
-        Err(_) => return (0, 0, 0, 0),
-    };
-    let reader = BufReader::new(file);
-
-    let mut mem_total = 0;
-    let mut mem_free = 0;
-    let mut swap_total = 0;
-    let mut swap_free = 0;
-
-    for line in reader.lines().map_while(Result::ok) {
-        let parts: Vec<_> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        match parts[0] {
-            "MemTotal:" => mem_total = parts[1].parse().unwrap_or(0),
-            "MemAvailable:" => mem_free = parts[1].parse().unwrap_or(0),
-            "SwapTotal:" => swap_total = parts[1].parse().unwrap_or(0),
-            "SwapFree:" => swap_free = parts[1].parse().unwrap_or(0),
-            _ => {}
-        }
-    }
-
-    if mem_free == 0 {
-        mem_free = fallback_mem_free().unwrap_or(0);
-    }
-    (mem_total, mem_free, swap_total, swap_free)
-}
-
-fn fallback_mem_free() -> Option<u64> {
-    let file = File::open("/proc/meminfo").ok()?;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if let Some(stripped) = line.strip_prefix("MemFree:") {
-            let val = stripped.split_whitespace().next()?;
-            return val.parse::<u64>().ok();
-        }
-    }
-    None
+    let content = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    parse_meminfo_content(&content)
 }
 
 fn parse_cpuinfo() -> (String, usize) {
-    let file = match File::open("/proc/cpuinfo") {
-        Ok(f) => f,
-        Err(_) => return ("Unknown CPU".to_string(), 0),
-    };
-    let reader = BufReader::new(file);
+    let content = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    parse_cpuinfo_content(&content)
+}
 
+fn parse_cpuinfo_content(content: &str) -> (String, usize) {
     let mut brand = "Unknown CPU".to_string();
     let mut core_count = 0;
 
     let mut cpu_implementer = String::new();
     let mut cpu_part = String::new();
 
-    for line in reader.lines().map_while(Result::ok) {
+    for line in content.lines() {
         if line.starts_with("processor") {
             core_count += 1;
         } else if let Some(model_str) = line.strip_prefix("model name") {
@@ -1119,12 +1073,7 @@ fn get_current_user_and_ip() -> (String, String) {
     let user = env::var("USER")
         .or_else(|_| env::var("LOGNAME"))
         .unwrap_or_else(|_| "unknown".to_string());
-    let ssh_connection = env::var("SSH_CONNECTION").unwrap_or_default();
-    let from_ip = ssh_connection
-        .split_whitespace()
-        .next()
-        .unwrap_or("unknown")
-        .to_string();
+    let from_ip = parse_ssh_connection_ip(&env::var("SSH_CONNECTION").unwrap_or_default());
     (user, from_ip)
 }
 
@@ -1338,14 +1287,7 @@ fn get_default_interface() -> Option<String> {
         return None;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() > 4 && parts[0] == "default" && parts[1] == "via" && parts[3] == "dev" {
-            return Some(parts[4].to_string());
-        }
-    }
-    None
+    parse_default_interface_output(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn get_interface_ipv4(iface: &str) -> Option<String> {
@@ -1358,7 +1300,85 @@ fn get_interface_ipv4(iface: &str) -> Option<String> {
         return None;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_interface_ipv4_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn detect_virtualization_from_cgroup(content: &str) -> Option<String> {
+    if content.contains("docker") {
+        Some("Docker".to_string())
+    } else if content.contains("lxc") {
+        Some("LXC".to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_uptime_content(line: &str) -> Option<String> {
+    let parts: Vec<_> = line.split_whitespace().collect();
+    let total_seconds = parts.first()?.parse::<f64>().ok()? as u64;
+
+    Some(format_uptime(total_seconds))
+}
+
+fn parse_redhat_release_content(content: &str) -> Option<(String, String)> {
+    let line = content.trim();
+    let needle = " release ";
+    let pos = line.find(needle)?;
+    let os_name = &line[..pos];
+    let ver_str = &line[pos + needle.len()..];
+    Some((os_name.to_string(), ver_str.to_string()))
+}
+
+fn parse_meminfo_content(content: &str) -> (u64, u64, u64, u64) {
+    let mut mem_total = 0;
+    let mut mem_available = 0;
+    let mut mem_free = 0;
+    let mut swap_total = 0;
+    let mut swap_free = 0;
+
+    for line in content.lines() {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        match parts[0] {
+            "MemTotal:" => mem_total = parts[1].parse().unwrap_or(0),
+            "MemAvailable:" => mem_available = parts[1].parse().unwrap_or(0),
+            "MemFree:" => mem_free = parts[1].parse().unwrap_or(0),
+            "SwapTotal:" => swap_total = parts[1].parse().unwrap_or(0),
+            "SwapFree:" => swap_free = parts[1].parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+
+    (
+        mem_total,
+        mem_available.max(mem_free),
+        swap_total,
+        swap_free,
+    )
+}
+
+fn parse_ssh_connection_ip(ssh_connection: &str) -> String {
+    ssh_connection
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn parse_default_interface_output(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() > 4 && parts[0] == "default" && parts[1] == "via" && parts[3] == "dev" {
+            return Some(parts[4].to_string());
+        }
+    }
+    None
+}
+
+fn parse_interface_ipv4_output(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() > 3 && parts[2] == "inet" {
@@ -1390,6 +1410,12 @@ mod tests {
     fn format_uptime_formats_without_days() {
         let value = format_uptime(3661);
         assert_eq!(value, "01:01:01");
+    }
+
+    #[test]
+    fn parse_uptime_content_rejects_invalid_input() {
+        assert_eq!(parse_uptime_content("not-a-number 0"), None);
+        assert_eq!(parse_uptime_content(""), None);
     }
 
     #[test]
@@ -1452,6 +1478,109 @@ mod tests {
         let resolution = resolve_welcome_text(&cfg);
         assert_eq!(resolution.source, WelcomeSource::Default);
         assert_eq!(resolution.text, DEFAULT_WELCOME);
+    }
+
+    #[test]
+    fn parse_os_release_content_requires_name_and_version() {
+        assert_eq!(
+            parse_os_release_content("NAME=\"Rocky Linux\"\nVERSION_ID=\"9.7\"\n"),
+            Some(("Rocky Linux".to_string(), "9.7".to_string()))
+        );
+        assert_eq!(parse_os_release_content("NAME=\"Rocky Linux\"\n"), None);
+        assert_eq!(parse_os_release_content("VERSION_ID=\"9.7\"\n"), None);
+    }
+
+    #[test]
+    fn parse_redhat_release_content_rejects_unexpected_format() {
+        assert_eq!(
+            parse_redhat_release_content("Rocky Linux release 9.7 (Blue Onyx)\n"),
+            Some(("Rocky Linux".to_string(), "9.7 (Blue Onyx)".to_string()))
+        );
+        assert_eq!(parse_redhat_release_content("Rocky Linux 9.7"), None);
+    }
+
+    #[test]
+    fn parse_meminfo_content_falls_back_to_memfree_when_memavailable_missing() {
+        let content = "\
+MemTotal:       16384 kB\n\
+MemFree:         4096 kB\n\
+SwapTotal:       2048 kB\n\
+SwapFree:        1024 kB\n";
+
+        assert_eq!(parse_meminfo_content(content), (16384, 4096, 2048, 1024));
+    }
+
+    #[test]
+    fn parse_meminfo_content_tolerates_invalid_values() {
+        let content = "\
+MemTotal:       nope kB\n\
+MemAvailable:   2048 kB\n\
+SwapTotal:      broken kB\n\
+SwapFree:       1024 kB\n";
+
+        assert_eq!(parse_meminfo_content(content), (0, 2048, 0, 1024));
+    }
+
+    #[test]
+    fn parse_cpuinfo_content_detects_arm_fallback_brand() {
+        let content = "\
+processor\t: 0\n\
+processor\t: 1\n\
+CPU implementer\t: 0x41\n\
+CPU part\t: 0xd08\n";
+
+        assert_eq!(
+            parse_cpuinfo_content(content),
+            ("ARM Cortex-A72".to_string(), 2)
+        );
+    }
+
+    #[test]
+    fn parse_ssh_connection_ip_defaults_to_unknown_when_missing() {
+        assert_eq!(parse_ssh_connection_ip(""), "unknown");
+        assert_eq!(parse_ssh_connection_ip("   "), "unknown");
+        assert_eq!(
+            parse_ssh_connection_ip("192.168.2.2 54012 192.168.88.121 22"),
+            "192.168.2.2"
+        );
+    }
+
+    #[test]
+    fn parse_default_interface_output_skips_malformed_lines() {
+        let output = "\
+default via 192.168.88.1 dev ens192 proto static\n\
+default dev broken\n";
+        assert_eq!(
+            parse_default_interface_output(output),
+            Some("ens192".to_string())
+        );
+        assert_eq!(parse_default_interface_output("default dev broken\n"), None);
+    }
+
+    #[test]
+    fn parse_interface_ipv4_output_returns_none_without_inet_record() {
+        let valid = "2: ens192    inet 192.168.88.121/24 brd 192.168.88.255 scope global ens192\n";
+        let invalid =
+            "2: ens192    mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000\n";
+
+        assert_eq!(
+            parse_interface_ipv4_output(valid),
+            Some("192.168.88.121".to_string())
+        );
+        assert_eq!(parse_interface_ipv4_output(invalid), None);
+    }
+
+    #[test]
+    fn detect_virtualization_from_cgroup_detects_known_runtimes() {
+        assert_eq!(
+            detect_virtualization_from_cgroup("12:cpu:/docker/abcdef"),
+            Some("Docker".to_string())
+        );
+        assert_eq!(
+            detect_virtualization_from_cgroup("1:name=systemd:/lxc.payload/demo"),
+            Some("LXC".to_string())
+        );
+        assert_eq!(detect_virtualization_from_cgroup("0::/"), None);
     }
 
     #[test]
