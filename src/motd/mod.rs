@@ -25,7 +25,7 @@ fn build_output(verbose: bool, cfg: &MotdConfig, ctx: &RenderContext) -> Vec<Str
     let welcome = resolve_welcome_text(cfg);
     let selection = resolve_modules(cfg);
     let output = resolve_output_settings(cfg);
-    let snapshot = collect_snapshot();
+    let snapshot = collect_snapshot(&selection.modules, cfg);
     let mut lines = Vec::new();
 
     if !output.compact {

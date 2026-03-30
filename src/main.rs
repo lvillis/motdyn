@@ -93,7 +93,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        None => run_motd(&cli),
+        None => run_motd_safely(&cli),
     }
 }
 
@@ -126,6 +126,15 @@ fn run_motd(cli: &Cli) {
     }
 
     motd::render(cli.verbose, &merged_cfg, &render_ctx);
+}
+
+fn run_motd_safely(cli: &Cli) {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(|| run_motd(cli));
+    std::panic::set_hook(previous_hook);
+
+    let _ = result;
 }
 
 #[cfg(test)]

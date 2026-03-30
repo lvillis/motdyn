@@ -115,6 +115,37 @@ pub(super) fn build_verbose_items(
         },
     ];
 
+    if !snapshot.diagnostics.load_source.is_empty() {
+        items.push(RenderedItem {
+            label: "Load source:".to_string(),
+            value: snapshot.diagnostics.load_source.clone(),
+        });
+    }
+    if !snapshot.diagnostics.last_login_source.is_empty() {
+        items.push(RenderedItem {
+            label: "Last login source:".to_string(),
+            value: snapshot.diagnostics.last_login_source.clone(),
+        });
+    }
+    if !snapshot.diagnostics.failed_login_source.is_empty() {
+        items.push(RenderedItem {
+            label: "Failed login source:".to_string(),
+            value: snapshot.diagnostics.failed_login_source.clone(),
+        });
+    }
+    if !snapshot.diagnostics.service_status_source.is_empty() {
+        items.push(RenderedItem {
+            label: "Service source:".to_string(),
+            value: snapshot.diagnostics.service_status_source.clone(),
+        });
+    }
+    if !snapshot.diagnostics.updates_source.is_empty() {
+        items.push(RenderedItem {
+            label: "Update source:".to_string(),
+            value: snapshot.diagnostics.updates_source.clone(),
+        });
+    }
+
     if let Some(url) = &welcome.url {
         items.push(RenderedItem {
             label: "Welcome URL:".to_string(),
@@ -338,6 +369,7 @@ pub(super) fn default_modules() -> Vec<ModuleKind> {
         ModuleKind::User,
         ModuleKind::Time,
         ModuleKind::Uptime,
+        ModuleKind::Load,
         ModuleKind::Os,
         ModuleKind::Kernel,
         ModuleKind::Virtualization,
@@ -380,6 +412,10 @@ fn render_module_items(
         ModuleKind::Uptime => vec![RenderedItem {
             label: "System uptime:".to_string(),
             value: paint(snapshot.uptime_str.clone(), PaintKind::Yellow, settings),
+        }],
+        ModuleKind::Load => vec![RenderedItem {
+            label: "Load average:".to_string(),
+            value: paint(snapshot.load_average.clone(), PaintKind::Yellow, settings),
         }],
         ModuleKind::Os => vec![RenderedItem {
             label: "Operating system:".to_string(),
@@ -434,6 +470,19 @@ fn render_module_items(
             }
         }
         ModuleKind::Disk => render_disk_items(snapshot, settings),
+        ModuleKind::LastLogin => vec![RenderedItem {
+            label: "Last login:".to_string(),
+            value: paint(snapshot.last_login.clone(), PaintKind::Yellow, settings),
+        }],
+        ModuleKind::FailedLogin => vec![RenderedItem {
+            label: "Failed login:".to_string(),
+            value: paint_failed_login(snapshot.failed_login.clone(), settings),
+        }],
+        ModuleKind::Services => render_service_items(snapshot, settings),
+        ModuleKind::Updates => vec![RenderedItem {
+            label: "Pending updates:".to_string(),
+            value: paint(snapshot.update_summary.clone(), PaintKind::Yellow, settings),
+        }],
     }
 }
 
@@ -520,10 +569,21 @@ fn render_disk_items(snapshot: &SystemSnapshot, settings: &OutputSettings) -> Ve
         .collect()
 }
 
+fn render_service_items(snapshot: &SystemSnapshot, settings: &OutputSettings) -> Vec<RenderedItem> {
+    snapshot
+        .service_items
+        .iter()
+        .map(|item| RenderedItem {
+            label: item.label.clone(),
+            value: paint_service_state(item.value.clone(), settings),
+        })
+        .collect()
+}
+
 fn module_section(module: ModuleKind) -> SectionKind {
     match module {
         ModuleKind::Host | ModuleKind::Network | ModuleKind::User => SectionKind::Identity,
-        ModuleKind::Time | ModuleKind::Uptime => SectionKind::Runtime,
+        ModuleKind::Time | ModuleKind::Uptime | ModuleKind::Load => SectionKind::Runtime,
         ModuleKind::Os
         | ModuleKind::Kernel
         | ModuleKind::Virtualization
@@ -531,6 +591,10 @@ fn module_section(module: ModuleKind) -> SectionKind {
         | ModuleKind::Memory
         | ModuleKind::Swap => SectionKind::System,
         ModuleKind::Disk => SectionKind::Storage,
+        ModuleKind::LastLogin
+        | ModuleKind::FailedLogin
+        | ModuleKind::Services
+        | ModuleKind::Updates => SectionKind::Operations,
     }
 }
 
@@ -556,6 +620,7 @@ fn normalize_module_name(name: &str) -> Option<ModuleKind> {
         "user" | "users" | "login" => Some(ModuleKind::User),
         "time" | "clock" | "datetime" => Some(ModuleKind::Time),
         "uptime" => Some(ModuleKind::Uptime),
+        "load" | "loadavg" | "load_average" => Some(ModuleKind::Load),
         "os" | "system" => Some(ModuleKind::Os),
         "kernel" => Some(ModuleKind::Kernel),
         "virtualization" | "virt" | "container" => Some(ModuleKind::Virtualization),
@@ -563,6 +628,10 @@ fn normalize_module_name(name: &str) -> Option<ModuleKind> {
         "memory" | "mem" => Some(ModuleKind::Memory),
         "swap" => Some(ModuleKind::Swap),
         "disk" | "disks" | "filesystem" | "fs" => Some(ModuleKind::Disk),
+        "last_login" | "lastlogin" | "last" => Some(ModuleKind::LastLogin),
+        "failed_login" | "failedlogin" | "failed" | "security" => Some(ModuleKind::FailedLogin),
+        "services" | "service" | "systemd" => Some(ModuleKind::Services),
+        "updates" | "update" | "packages" | "package_updates" => Some(ModuleKind::Updates),
         _ => None,
     }
 }
@@ -588,4 +657,20 @@ fn command_exists(command: &str) -> bool {
     };
 
     env::split_paths(&paths).any(|dir| dir.join(command).is_file())
+}
+
+fn paint_service_state(value: String, settings: &OutputSettings) -> String {
+    match value.as_str() {
+        "active" => paint(value, PaintKind::Green, settings),
+        "inactive" | "failed" | "unavailable" => paint(value, PaintKind::Yellow, settings),
+        _ => value,
+    }
+}
+
+fn paint_failed_login(value: String, settings: &OutputSettings) -> String {
+    match value.as_str() {
+        "none" => paint(value, PaintKind::Green, settings),
+        "unavailable" => paint(value, PaintKind::Yellow, settings),
+        _ => paint(value, PaintKind::Yellow, settings),
+    }
 }

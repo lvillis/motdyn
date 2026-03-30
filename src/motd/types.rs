@@ -34,7 +34,7 @@ pub(super) struct LinuxUtmpRecord {
 
 pub(super) const DEFAULT_WELCOME: &str = "Welcome!";
 pub(super) const DEFAULT_FAREWELL: &str = "Have a nice day!";
-pub(super) const DEFAULT_WELCOME_TIMEOUT_MS: u64 = 1_000;
+pub(super) const DEFAULT_WELCOME_TIMEOUT_MS: u64 = 250;
 pub(super) const DEFAULT_WELCOME_CACHE_TTL_SECS: u64 = 300;
 pub(super) const DEFAULT_WELCOME_CACHE_PATH: &str = "~/.cache/motdyn/welcome.txt";
 pub(super) const MAX_WELCOME_BODY_BYTES: usize = 8 * 1024;
@@ -55,6 +55,7 @@ pub(super) enum ModuleKind {
     User,
     Time,
     Uptime,
+    Load,
     Os,
     Kernel,
     Virtualization,
@@ -62,6 +63,10 @@ pub(super) enum ModuleKind {
     Memory,
     Swap,
     Disk,
+    LastLogin,
+    FailedLogin,
+    Services,
+    Updates,
 }
 
 impl ModuleKind {
@@ -72,6 +77,7 @@ impl ModuleKind {
             Self::User => "user",
             Self::Time => "time",
             Self::Uptime => "uptime",
+            Self::Load => "load",
             Self::Os => "os",
             Self::Kernel => "kernel",
             Self::Virtualization => "virtualization",
@@ -79,6 +85,10 @@ impl ModuleKind {
             Self::Memory => "memory",
             Self::Swap => "swap",
             Self::Disk => "disk",
+            Self::LastLogin => "last_login",
+            Self::FailedLogin => "failed_login",
+            Self::Services => "services",
+            Self::Updates => "updates",
         }
     }
 }
@@ -113,6 +123,7 @@ pub(super) struct SystemSnapshot {
     pub(super) login_user_count: usize,
     pub(super) now_str_with_tz: String,
     pub(super) uptime_str: String,
+    pub(super) load_average: String,
     pub(super) os_name: String,
     pub(super) os_version: String,
     pub(super) kernel_version: String,
@@ -122,6 +133,10 @@ pub(super) struct SystemSnapshot {
     pub(super) memory: UsageSummary,
     pub(super) swap: UsageSummary,
     pub(super) disk_items: Vec<RenderedItem>,
+    pub(super) last_login: String,
+    pub(super) failed_login: String,
+    pub(super) service_items: Vec<RenderedItem>,
+    pub(super) update_summary: String,
     pub(super) diagnostics: SnapshotDiagnostics,
 }
 
@@ -311,12 +326,18 @@ impl fmt::Display for NetworkProbeError {
 pub(super) enum ProbeIssue {
     Network(NetworkProbeError),
     UptimeReadFailed,
+    LoadAverageReadFailed,
     HostReadFailed,
     KernelReadFailed,
     OsMetadataMissing,
+    VirtualizationProbeFailed(String),
     CpuInfoUnstable,
     MemoryInfoMissing,
     SshConnectionMissing,
+    LastLoginProbeFailed(String),
+    FailedLoginProbeFailed(String),
+    ServiceStatusProbeFailed(String),
+    UpdateProbeFailed(String),
 }
 
 impl fmt::Display for ProbeIssue {
@@ -326,6 +347,9 @@ impl fmt::Display for ProbeIssue {
             Self::UptimeReadFailed => {
                 write!(f, "uptime: failed to read or parse /proc/uptime")
             }
+            Self::LoadAverageReadFailed => {
+                write!(f, "load: failed to read or parse /proc/loadavg")
+            }
             Self::HostReadFailed => {
                 write!(f, "host: failed to read /proc/sys/kernel/hostname")
             }
@@ -334,6 +358,9 @@ impl fmt::Display for ProbeIssue {
             }
             Self::OsMetadataMissing => {
                 write!(f, "os: no release metadata found; using kernel fallback")
+            }
+            Self::VirtualizationProbeFailed(message) => {
+                write!(f, "virtualization: {}", message)
             }
             Self::CpuInfoUnstable => {
                 write!(
@@ -350,6 +377,18 @@ impl fmt::Display for ProbeIssue {
                     "user: SSH_CONNECTION missing; source IP shown as unknown"
                 )
             }
+            Self::LastLoginProbeFailed(message) => {
+                write!(f, "last_login: {}", message)
+            }
+            Self::FailedLoginProbeFailed(message) => {
+                write!(f, "failed_login: {}", message)
+            }
+            Self::ServiceStatusProbeFailed(message) => {
+                write!(f, "services: {}", message)
+            }
+            Self::UpdateProbeFailed(message) => {
+                write!(f, "updates: {}", message)
+            }
         }
     }
 }
@@ -362,6 +401,11 @@ pub(super) struct SnapshotDiagnostics {
     pub(super) network_source: String,
     pub(super) login_user_count_source: String,
     pub(super) virtualization_source: String,
+    pub(super) load_source: String,
+    pub(super) last_login_source: String,
+    pub(super) failed_login_source: String,
+    pub(super) service_status_source: String,
+    pub(super) updates_source: String,
 }
 
 impl SnapshotDiagnostics {
@@ -411,6 +455,7 @@ pub(super) enum SectionKind {
     Runtime,
     System,
     Storage,
+    Operations,
 }
 
 impl SectionKind {
@@ -420,6 +465,7 @@ impl SectionKind {
             Self::Runtime => "Runtime",
             Self::System => "System",
             Self::Storage => "Storage",
+            Self::Operations => "Operations",
         }
     }
 }

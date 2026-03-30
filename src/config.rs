@@ -16,6 +16,7 @@ struct RawConfig {
     #[serde(default, deserialize_with = "deserialize_module_list")]
     modules: Option<Vec<String>>,
     remote_welcome: Option<RemoteWelcomeConfig>,
+    service_status: Option<ServiceStatusConfig>,
     output: Option<OutputConfig>,
 }
 
@@ -28,6 +29,12 @@ pub struct RemoteWelcomeConfig {
     pub cache_path: Option<String>,
     pub follow_redirects: Option<bool>,
     pub allow_http: Option<bool>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceStatusConfig {
+    pub services: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -47,6 +54,7 @@ pub struct MotdConfig {
     pub farewell: Option<String>,
     pub modules: Option<Vec<String>>,
     pub remote_welcome: RemoteWelcomeConfig,
+    pub service_status: ServiceStatusConfig,
     pub output: OutputConfig,
 }
 
@@ -57,6 +65,7 @@ enum ConfigModuleName {
     User,
     Time,
     Uptime,
+    Load,
     Os,
     Kernel,
     Virtualization,
@@ -64,6 +73,10 @@ enum ConfigModuleName {
     Memory,
     Swap,
     Disk,
+    LastLogin,
+    FailedLogin,
+    Services,
+    Updates,
 }
 
 impl ConfigModuleName {
@@ -74,6 +87,7 @@ impl ConfigModuleName {
             "user" | "users" | "login" => Some(Self::User),
             "time" | "clock" | "datetime" => Some(Self::Time),
             "uptime" => Some(Self::Uptime),
+            "load" | "loadavg" | "load_average" => Some(Self::Load),
             "os" | "system" => Some(Self::Os),
             "kernel" => Some(Self::Kernel),
             "virtualization" | "virt" | "container" => Some(Self::Virtualization),
@@ -81,6 +95,10 @@ impl ConfigModuleName {
             "memory" | "mem" => Some(Self::Memory),
             "swap" => Some(Self::Swap),
             "disk" | "disks" | "filesystem" | "fs" => Some(Self::Disk),
+            "last_login" | "lastlogin" | "last" => Some(Self::LastLogin),
+            "failed_login" | "failedlogin" | "failed" | "security" => Some(Self::FailedLogin),
+            "services" | "service" | "systemd" => Some(Self::Services),
+            "updates" | "update" | "packages" | "package_updates" => Some(Self::Updates),
             _ => None,
         }
     }
@@ -92,6 +110,7 @@ impl ConfigModuleName {
             Self::User => "user",
             Self::Time => "time",
             Self::Uptime => "uptime",
+            Self::Load => "load",
             Self::Os => "os",
             Self::Kernel => "kernel",
             Self::Virtualization => "virtualization",
@@ -99,6 +118,10 @@ impl ConfigModuleName {
             Self::Memory => "memory",
             Self::Swap => "swap",
             Self::Disk => "disk",
+            Self::LastLogin => "last_login",
+            Self::FailedLogin => "failed_login",
+            Self::Services => "services",
+            Self::Updates => "updates",
         }
     }
 }
@@ -306,6 +329,7 @@ pub fn merge_config(sys_cfg: Option<MotdConfig>, usr_cfg: Option<MotdConfig>) ->
             final_cfg.modules = Some(modules);
         }
         merge_remote_welcome(&mut final_cfg.remote_welcome, user_cfg.remote_welcome);
+        merge_service_status(&mut final_cfg.service_status, user_cfg.service_status);
         merge_output(&mut final_cfg.output, user_cfg.output);
     }
     final_cfg
@@ -315,6 +339,7 @@ fn validate_and_normalize(raw: RawConfig, path: &Path) -> Result<MotdConfig, Con
     let mut issues = Vec::new();
     let remote_welcome =
         normalize_remote_welcome(raw.remote_welcome.unwrap_or_default(), &mut issues);
+    let service_status = normalize_service_status(raw.service_status.unwrap_or_default());
     let output = normalize_output(raw.output.unwrap_or_default());
     let config = MotdConfig {
         welcome: normalize_optional_text(raw.welcome),
@@ -322,6 +347,7 @@ fn validate_and_normalize(raw: RawConfig, path: &Path) -> Result<MotdConfig, Con
         farewell: normalize_optional_text(raw.farewell),
         modules: raw.modules,
         remote_welcome,
+        service_status,
         output,
     };
 
@@ -432,6 +458,17 @@ fn merge_remote_welcome(target: &mut RemoteWelcomeConfig, source: RemoteWelcomeC
     }
 }
 
+fn normalize_service_status(mut config: ServiceStatusConfig) -> ServiceStatusConfig {
+    config.services = normalize_ordered_string_list(config.services);
+    config
+}
+
+fn merge_service_status(target: &mut ServiceStatusConfig, source: ServiceStatusConfig) {
+    if let Some(services) = source.services {
+        target.services = Some(services);
+    }
+}
+
 fn merge_output(target: &mut OutputConfig, source: OutputConfig) {
     if let Some(compact) = source.compact {
         target.compact = Some(compact);
@@ -498,7 +535,7 @@ mod tests {
         let config_path = dir.path().join("config.toml");
         fs::write(
             &config_path,
-            "welcome = \"hi\"\nfarewell = \"bye\"\nmodules = [\"host\", \"time\"]\n[remote_welcome]\ntimeout_ms = 250\n[output]\ncompact = true\nhidden_fields = [\"source_ip\"]\n",
+            "welcome = \"hi\"\nfarewell = \"bye\"\nmodules = [\"host\", \"time\"]\n[remote_welcome]\ntimeout_ms = 250\n[service_status]\nservices = [\"sshd\", \"chronyd\"]\n[output]\ncompact = true\nhidden_fields = [\"source_ip\"]\n",
         )
         .unwrap();
 
@@ -512,6 +549,10 @@ mod tests {
             Some(&["host".to_string(), "time".to_string()][..])
         );
         assert_eq!(cfg.remote_welcome.timeout_ms, Some(250));
+        assert_eq!(
+            cfg.service_status.services.as_deref(),
+            Some(&["sshd".to_string(), "chronyd".to_string()][..])
+        );
         assert_eq!(cfg.output.compact, Some(true));
         assert_eq!(
             cfg.output.hidden_fields.as_deref(),
@@ -561,7 +602,7 @@ mod tests {
         let config_path = dir.path().join("config.toml");
         fs::write(
             &config_path,
-            "welcome = \"  hi  \"\nwelcome_sources = [\" ./motd.txt \", \"\", \"https://example.com/motd.txt\", \"./motd.txt\"]\nfarewell = \"  \"\nmodules = [\" host \", \"hostname\", \"\", \"time\"]\n[output]\nhidden_fields = [\" source_ip \", \"from_ip\", \"  \", \"nfs\"]\n",
+            "welcome = \"  hi  \"\nwelcome_sources = [\" ./motd.txt \", \"\", \"https://example.com/motd.txt\", \"./motd.txt\"]\nfarewell = \"  \"\nmodules = [\" host \", \"hostname\", \"\", \"time\"]\n[service_status]\nservices = [\" sshd \", \"\", \"chronyd\", \"sshd\"]\n[output]\nhidden_fields = [\" source_ip \", \"from_ip\", \"  \", \"nfs\"]\n",
         )
         .unwrap();
 
@@ -581,6 +622,10 @@ mod tests {
         assert_eq!(
             cfg.modules.as_deref(),
             Some(&["host".to_string(), "time".to_string()][..])
+        );
+        assert_eq!(
+            cfg.service_status.services.as_deref(),
+            Some(&["sshd".to_string(), "chronyd".to_string()][..])
         );
         assert_eq!(
             cfg.output.hidden_fields.as_deref(),
@@ -648,6 +693,9 @@ mod tests {
                 allow_http: Some(false),
                 ..RemoteWelcomeConfig::default()
             },
+            service_status: ServiceStatusConfig {
+                services: Some(vec!["sshd".into(), "chronyd".into()]),
+            },
             output: OutputConfig::default(),
         };
         let usr = MotdConfig {
@@ -662,6 +710,9 @@ mod tests {
                 cache_ttl_secs: Some(60),
                 allow_http: Some(true),
                 ..RemoteWelcomeConfig::default()
+            },
+            service_status: ServiceStatusConfig {
+                services: Some(vec!["docker".into()]),
             },
             output: OutputConfig {
                 compact: Some(true),
@@ -688,6 +739,10 @@ mod tests {
         assert_eq!(merged.remote_welcome.timeout_ms, Some(500));
         assert_eq!(merged.remote_welcome.cache_ttl_secs, Some(60));
         assert_eq!(merged.remote_welcome.allow_http, Some(true));
+        assert_eq!(
+            merged.service_status.services.as_deref(),
+            Some(&["docker".to_string()][..])
+        );
         assert_eq!(merged.output.compact, Some(true));
     }
 

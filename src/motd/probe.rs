@@ -3,7 +3,9 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use libc::{endutxent, getutxent, setutxent, statvfs, USER_PROCESS};
@@ -12,17 +14,46 @@ use std::ffi::CString;
 #[cfg(unix)]
 use std::mem::MaybeUninit;
 
+use crate::config::MotdConfig;
+
 use super::types::{
     LinuxUtmpRecord, ModuleKind, NetworkProbeError, ProbeIssue, RenderedItem, SnapshotDiagnostics,
     SystemSnapshot, UsageSummary,
 };
 
-pub(super) fn collect_snapshot() -> SystemSnapshot {
+const CORE_PROBE_TIMEOUT_MS: u64 = 120;
+const OPTIONAL_PROBE_TIMEOUT_MS: u64 = 150;
+const UPDATES_PROBE_TIMEOUT_MS: u64 = 250;
+const COMMAND_POLL_INTERVAL_MS: u64 = 10;
+
+#[derive(Debug)]
+pub(super) struct TimedCommandOutput {
+    pub(super) status: ExitStatus,
+    pub(super) stdout: String,
+    pub(super) stderr: String,
+}
+
+pub(super) fn collect_snapshot(
+    requested_modules: &[ModuleKind],
+    cfg: &MotdConfig,
+) -> SystemSnapshot {
     let mut diagnostics = SnapshotDiagnostics::default();
     let ((os_name, os_version), os_source) = get_os_info();
     diagnostics.os_source = os_source.to_string();
     let now_str_with_tz = Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string();
     let uptime_str = parse_uptime().unwrap_or_else(|| "unknown".to_string());
+    let load_average = if module_enabled(requested_modules, ModuleKind::Load) {
+        diagnostics.load_source = "/proc/loadavg".to_string();
+        match parse_load_average() {
+            Some(value) => value,
+            None => {
+                diagnostics.degrade(ModuleKind::Load, ProbeIssue::LoadAverageReadFailed);
+                "unknown".to_string()
+            }
+        }
+    } else {
+        String::new()
+    };
     let kernel_version = read_first_line("/proc/sys/kernel/osrelease")
         .unwrap_or_else(|| "Unknown kernel".to_string());
     let host_name =
@@ -32,9 +63,70 @@ pub(super) fn collect_snapshot() -> SystemSnapshot {
     let (current_user, from_ip) = get_current_user_and_ip();
     let (login_user_count, login_user_count_source) = get_logged_in_user_count();
     diagnostics.login_user_count_source = login_user_count_source.to_string();
-    let (virt_info, virtualization_source) = detect_virtualization();
-    diagnostics.virtualization_source = virtualization_source.to_string();
+    let (virt_info, virtualization_source, virtualization_issue) = detect_virtualization();
+    diagnostics.virtualization_source = virtualization_source;
     diagnostics.network_source = "ip route/ip addr".to_string();
+    let last_login = if module_enabled(requested_modules, ModuleKind::LastLogin) {
+        diagnostics.last_login_source = "lastlog".to_string();
+        match probe_last_login(&current_user) {
+            Ok(Some(value)) => value,
+            Ok(None) => "never recorded".to_string(),
+            Err(err) => {
+                diagnostics.degrade(ModuleKind::LastLogin, ProbeIssue::LastLoginProbeFailed(err));
+                "unavailable".to_string()
+            }
+        }
+    } else {
+        String::new()
+    };
+    let failed_login = if module_enabled(requested_modules, ModuleKind::FailedLogin) {
+        diagnostics.failed_login_source = "lastb".to_string();
+        match probe_failed_login(&current_user) {
+            Ok(Some(value)) => value,
+            Ok(None) => "none".to_string(),
+            Err(err) => {
+                diagnostics.degrade(
+                    ModuleKind::FailedLogin,
+                    ProbeIssue::FailedLoginProbeFailed(err),
+                );
+                "unavailable".to_string()
+            }
+        }
+    } else {
+        String::new()
+    };
+    let service_items = if module_enabled(requested_modules, ModuleKind::Services) {
+        diagnostics.service_status_source = "systemctl is-active".to_string();
+        match probe_service_statuses(cfg.service_status.services.as_deref().unwrap_or(&[])) {
+            Ok(items) => items,
+            Err(err) => {
+                diagnostics.degrade(
+                    ModuleKind::Services,
+                    ProbeIssue::ServiceStatusProbeFailed(err),
+                );
+                vec![RenderedItem {
+                    label: "Service status:".to_string(),
+                    value: "unavailable".to_string(),
+                }]
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let update_summary = if module_enabled(requested_modules, ModuleKind::Updates) {
+        match probe_package_updates() {
+            Ok((summary, source)) => {
+                diagnostics.updates_source = source;
+                summary
+            }
+            Err(err) => {
+                diagnostics.degrade(ModuleKind::Updates, ProbeIssue::UpdateProbeFailed(err));
+                "unavailable".to_string()
+            }
+        }
+    } else {
+        String::new()
+    };
 
     let main_iface = match get_default_interface() {
         Ok(iface) => iface,
@@ -67,6 +159,9 @@ pub(super) fn collect_snapshot() -> SystemSnapshot {
     if os_source == "/proc/sys/kernel/ostype" {
         diagnostics.degrade(ModuleKind::Os, ProbeIssue::OsMetadataMissing);
     }
+    if let Some(issue) = virtualization_issue {
+        diagnostics.degrade(ModuleKind::Virtualization, issue);
+    }
     if cpu_brand == "Unknown CPU" || cpu_count == 0 {
         diagnostics.degrade(ModuleKind::Cpu, ProbeIssue::CpuInfoUnstable);
     }
@@ -86,6 +181,7 @@ pub(super) fn collect_snapshot() -> SystemSnapshot {
         login_user_count,
         now_str_with_tz,
         uptime_str,
+        load_average,
         os_name,
         os_version,
         kernel_version,
@@ -95,8 +191,110 @@ pub(super) fn collect_snapshot() -> SystemSnapshot {
         memory: usage_summary(mem_total, mem_free),
         swap: usage_summary(swap_total, swap_free),
         disk_items: collect_disk_usage_items(),
+        last_login,
+        failed_login,
+        service_items,
+        update_summary,
         diagnostics,
     }
+}
+
+pub(super) fn parse_loadavg_content(content: &str) -> Option<String> {
+    let mut parts = content.split_whitespace();
+    let one = parts.next()?;
+    let five = parts.next()?;
+    let fifteen = parts.next()?;
+    Some(format!("{} {} {}", one, five, fifteen))
+}
+
+pub(super) fn parse_lastlog_output(output: &str) -> Option<Option<String>> {
+    let mut lines = output.lines().filter(|line| !line.trim().is_empty());
+    let header = lines.next()?;
+    let data = lines.next()?;
+
+    if data.contains("**Never logged in**") {
+        return Some(None);
+    }
+
+    let port_start = header.find("Port")?;
+    let from_start = header.find("From")?;
+    let latest_start = header.find("Latest")?;
+    if !(port_start < from_start && from_start < latest_start) {
+        return None;
+    }
+
+    let port = slice_column(data, port_start, from_start);
+    let from = slice_column(data, from_start, latest_start);
+    let latest = data.get(latest_start..)?.trim();
+    if latest.is_empty() {
+        return None;
+    }
+
+    let mut parts = vec![latest.to_string()];
+    if !from.is_empty() {
+        parts.push(format!("from {}", from));
+    }
+    if !port.is_empty() {
+        parts.push(format!("via {}", port));
+    }
+
+    Some(Some(parts.join(", ")))
+}
+
+pub(super) fn parse_lastb_output(output: &str) -> Option<Option<String>> {
+    let entries = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("btmp begins"))
+        .collect::<Vec<_>>();
+
+    if entries.is_empty() {
+        return Some(None);
+    }
+
+    let first = entries.first()?;
+    let mut parts = first.split_whitespace();
+    let _user = parts.next()?;
+    let port = parts.next().unwrap_or("unknown");
+    let source = parts.next().unwrap_or("unknown");
+    let when = parts.collect::<Vec<_>>().join(" ");
+
+    let mut summary = vec![if entries.len() == 1 {
+        "1 recent failure".to_string()
+    } else {
+        format!("{} recent failures", entries.len())
+    }];
+    if source != "unknown" {
+        summary.push(format!("last from {}", source));
+    }
+    if port != "unknown" {
+        summary.push(format!("via {}", port));
+    }
+    if !when.is_empty() {
+        summary.push(format!("at {}", when));
+    }
+
+    Some(Some(summary.join(", ")))
+}
+
+pub(super) fn parse_apt_upgradable_output(output: &str) -> usize {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("[upgradable from:"))
+        .count()
+}
+
+pub(super) fn parse_dnf_check_update_output(output: &str) -> usize {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("Last metadata expiration check:")
+                && line.split_whitespace().count() >= 3
+        })
+        .count()
 }
 
 pub(super) fn format_uptime(mut secs: u64) -> String {
@@ -318,6 +516,11 @@ fn parse_uptime() -> Option<String> {
     parse_uptime_content(&line)
 }
 
+fn parse_load_average() -> Option<String> {
+    let content = fs::read_to_string("/proc/loadavg").ok()?;
+    parse_loadavg_content(&content)
+}
+
 fn get_os_info() -> ((String, String), &'static str) {
     if let Some(result) = parse_redhat_release() {
         return (result, "/etc/redhat-release");
@@ -371,6 +574,162 @@ fn get_current_user_and_ip() -> (String, String) {
     (user, from_ip)
 }
 
+fn module_enabled(requested_modules: &[ModuleKind], module: ModuleKind) -> bool {
+    requested_modules.contains(&module)
+}
+
+fn probe_last_login(user: &str) -> Result<Option<String>, String> {
+    if user == "unknown" {
+        return Err("current user is unknown".to_string());
+    }
+
+    let output = run_command_with_timeout(
+        "lastlog",
+        &["-u", user],
+        &[("LC_ALL", "C")],
+        OPTIONAL_PROBE_TIMEOUT_MS,
+    )?;
+
+    if !output.status.success() {
+        let stderr = output.stderr.trim().to_string();
+        let detail = if stderr.is_empty() {
+            output.status.to_string()
+        } else {
+            stderr
+        };
+        return Err(format!("'lastlog -u {}' exited with {}", user, detail));
+    }
+
+    parse_lastlog_output(&output.stdout).ok_or_else(|| "unexpected 'lastlog' output".to_string())
+}
+
+fn probe_failed_login(user: &str) -> Result<Option<String>, String> {
+    if user == "unknown" {
+        return Err("current user is unknown".to_string());
+    }
+
+    let output = run_command_with_timeout(
+        "lastb",
+        &["-w", "-n", "20", user],
+        &[("LC_ALL", "C")],
+        OPTIONAL_PROBE_TIMEOUT_MS,
+    )?;
+
+    if !output.status.success() {
+        let stderr = output.stderr.trim().to_string();
+        let detail = if stderr.is_empty() {
+            output.status.to_string()
+        } else {
+            stderr
+        };
+        return Err(format!("'lastb -w -n 20 {}' exited with {}", user, detail));
+    }
+
+    parse_lastb_output(&output.stdout).ok_or_else(|| "unexpected 'lastb' output".to_string())
+}
+
+fn probe_service_statuses(services: &[String]) -> Result<Vec<RenderedItem>, String> {
+    if services.is_empty() {
+        return Ok(vec![RenderedItem {
+            label: "Service status:".to_string(),
+            value: "no services configured".to_string(),
+        }]);
+    }
+
+    let mut items = Vec::with_capacity(services.len());
+    for service in services {
+        let output = run_command_with_timeout(
+            "systemctl",
+            &["is-active", service],
+            &[("LC_ALL", "C")],
+            OPTIONAL_PROBE_TIMEOUT_MS,
+        )?;
+
+        let status = output.stdout.trim().to_string();
+        let fallback = output.stderr.trim().to_string();
+        let value = if status.is_empty() {
+            if fallback.is_empty() {
+                output.status.to_string()
+            } else {
+                fallback
+            }
+        } else {
+            status
+        };
+
+        items.push(RenderedItem {
+            label: format!("Service {}:", service),
+            value,
+        });
+    }
+
+    Ok(items)
+}
+
+fn probe_package_updates() -> Result<(String, String), String> {
+    if command_exists("apt") {
+        let output = run_command_with_timeout(
+            "apt",
+            &["list", "--upgradable"],
+            &[("LC_ALL", "C")],
+            UPDATES_PROBE_TIMEOUT_MS,
+        )?;
+
+        if !output.status.success() {
+            let stderr = output.stderr.trim().to_string();
+            let detail = if stderr.is_empty() {
+                output.status.to_string()
+            } else {
+                stderr
+            };
+            return Err(format!("'apt list --upgradable' exited with {}", detail));
+        }
+
+        let count = parse_apt_upgradable_output(&output.stdout);
+        let summary = if count == 0 {
+            "none (apt)".to_string()
+        } else {
+            format!("{} package(s) via apt", count)
+        };
+        return Ok((summary, "apt list --upgradable".to_string()));
+    }
+
+    if command_exists("dnf") {
+        let output = run_command_with_timeout(
+            "dnf",
+            &["-q", "check-update", "--cacheonly"],
+            &[("LC_ALL", "C")],
+            UPDATES_PROBE_TIMEOUT_MS,
+        )?;
+
+        match output.status.code() {
+            Some(0) | Some(100) => {
+                let count = parse_dnf_check_update_output(&output.stdout);
+                let summary = if count == 0 {
+                    "none (dnf)".to_string()
+                } else {
+                    format!("{} package(s) via dnf", count)
+                };
+                return Ok((summary, "dnf check-update --cacheonly".to_string()));
+            }
+            _ => {
+                let stderr = output.stderr.trim().to_string();
+                let detail = if stderr.is_empty() {
+                    output.status.to_string()
+                } else {
+                    stderr
+                };
+                return Err(format!(
+                    "'dnf -q check-update --cacheonly' exited with {}",
+                    detail
+                ));
+            }
+        }
+    }
+
+    Err("no supported package manager found".to_string())
+}
+
 #[cfg(target_os = "linux")]
 fn get_logged_in_user_count() -> (usize, &'static str) {
     if let Some(count) = count_logged_in_users_from_linux_utmp() {
@@ -420,27 +779,136 @@ fn count_logged_in_users_from_linux_utmp() -> Option<usize> {
         .find_map(|path| count_logged_in_users_from_linux_utmp_file(Path::new(path)))
 }
 
-fn detect_virtualization() -> (Option<String>, &'static str) {
+pub(super) fn run_command_with_timeout(
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout_ms: u64,
+) -> Result<TimedCommandOutput, String> {
+    let command_line = format_command(program, args);
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("failed to run '{}': {}", command_line, err))?;
+    let stdout_handle = child.stdout.take().map(spawn_reader_thread);
+    let stderr_handle = child.stderr.take().map(spawn_reader_thread);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok(TimedCommandOutput {
+                    status,
+                    stdout: collect_reader_output(stdout_handle),
+                    stderr: collect_reader_output(stderr_handle),
+                });
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = collect_reader_output(stdout_handle);
+                let _ = collect_reader_output(stderr_handle);
+                return Err(format!(
+                    "'{}' timed out after {}ms",
+                    command_line, timeout_ms
+                ));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = collect_reader_output(stdout_handle);
+                let _ = collect_reader_output(stderr_handle);
+                return Err(format!(
+                    "failed while waiting for '{}': {}",
+                    command_line, err
+                ));
+            }
+        }
+    }
+}
+
+fn slice_column(line: &str, start: usize, end: usize) -> String {
+    line.get(start..line.len().min(end))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn format_command(program: &str, args: &[&str]) -> String {
+    if args.is_empty() {
+        program.to_string()
+    } else {
+        format!("{} {}", program, args.join(" "))
+    }
+}
+
+fn spawn_reader_thread<R>(mut reader: R) -> JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    })
+}
+
+fn collect_reader_output(handle: Option<JoinHandle<Vec<u8>>>) -> String {
+    let bytes = handle
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+fn command_exists(command: &str) -> bool {
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+
+    env::split_paths(&paths).any(|dir| dir.join(command).is_file())
+}
+
+fn detect_virtualization() -> (Option<String>, String, Option<ProbeIssue>) {
     if Path::new("/.dockerenv").exists() {
-        return (Some("Docker".to_string()), "/.dockerenv");
+        return (Some("Docker".to_string()), "/.dockerenv".to_string(), None);
     }
 
     if let Ok(content) = fs::read_to_string("/proc/1/cgroup") {
         if let Some(value) = detect_virtualization_from_cgroup(&content) {
-            return (Some(value), "/proc/1/cgroup");
+            return (Some(value), "/proc/1/cgroup".to_string(), None);
         }
     }
 
-    if let Ok(output) = Command::new("systemd-detect-virt").output() {
-        if output.status.success() {
-            let virt_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match run_command_with_timeout("systemd-detect-virt", &[], &[], CORE_PROBE_TIMEOUT_MS) {
+        Ok(output) if output.status.success() => {
+            let virt_str = output.stdout.trim().to_string();
             if virt_str != "none" && !virt_str.is_empty() {
-                return (Some(virt_str), "systemd-detect-virt");
+                return (Some(virt_str), "systemd-detect-virt".to_string(), None);
             }
         }
+        Ok(_) => {}
+        Err(err) => {
+            return (
+                None,
+                "systemd-detect-virt".to_string(),
+                Some(ProbeIssue::VirtualizationProbeFailed(err)),
+            );
+        }
     }
 
-    (None, "not detected")
+    (None, "not detected".to_string(), None)
 }
 
 #[cfg(unix)]
@@ -554,12 +1022,13 @@ fn kb_to_gb(kb: u64) -> f64 {
 }
 
 fn get_default_interface() -> Result<String, NetworkProbeError> {
-    let output = Command::new("ip")
-        .arg("route")
-        .arg("show")
-        .arg("default")
-        .output()
-        .map_err(|err| NetworkProbeError::DefaultRouteCommand(err.to_string()))?;
+    let output = run_command_with_timeout(
+        "ip",
+        &["route", "show", "default"],
+        &[],
+        CORE_PROBE_TIMEOUT_MS,
+    )
+    .map_err(NetworkProbeError::DefaultRouteCommand)?;
 
     if !output.status.success() {
         return Err(NetworkProbeError::DefaultRouteStatus(
@@ -567,18 +1036,20 @@ fn get_default_interface() -> Result<String, NetworkProbeError> {
         ));
     }
 
-    parse_default_interface_output(&String::from_utf8_lossy(&output.stdout))
-        .ok_or(NetworkProbeError::DefaultRouteParse)
+    parse_default_interface_output(&output.stdout).ok_or(NetworkProbeError::DefaultRouteParse)
 }
 
 fn get_interface_ipv4(iface: &str) -> Result<String, NetworkProbeError> {
-    let output = Command::new("ip")
-        .args(["-o", "-4", "addr", "show", "dev", iface])
-        .output()
-        .map_err(|err| NetworkProbeError::InterfaceIpv4Command {
-            iface: iface.to_string(),
-            message: err.to_string(),
-        })?;
+    let output = run_command_with_timeout(
+        "ip",
+        &["-o", "-4", "addr", "show", "dev", iface],
+        &[],
+        CORE_PROBE_TIMEOUT_MS,
+    )
+    .map_err(|message| NetworkProbeError::InterfaceIpv4Command {
+        iface: iface.to_string(),
+        message,
+    })?;
 
     if !output.status.success() {
         return Err(NetworkProbeError::InterfaceIpv4Status {
@@ -587,7 +1058,7 @@ fn get_interface_ipv4(iface: &str) -> Result<String, NetworkProbeError> {
         });
     }
 
-    parse_interface_ipv4_output(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+    parse_interface_ipv4_output(&output.stdout).ok_or_else(|| {
         NetworkProbeError::InterfaceIpv4Parse {
             iface: iface.to_string(),
         }

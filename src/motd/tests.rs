@@ -12,9 +12,11 @@ use crate::config::{MotdConfig, OutputConfig, RemoteWelcomeConfig};
 
 use super::probe::{
     count_logged_in_users_from_linux_utmp_file, detect_virtualization_from_cgroup, format_uptime,
-    parse_cpuinfo_content, parse_default_interface_output, parse_interface_ipv4_output,
-    parse_meminfo_content, parse_os_release_content, parse_redhat_release_content,
-    parse_ssh_connection_ip, parse_uptime_content, to_gb_and_ratio,
+    parse_apt_upgradable_output, parse_cpuinfo_content, parse_default_interface_output,
+    parse_dnf_check_update_output, parse_interface_ipv4_output, parse_lastb_output,
+    parse_lastlog_output, parse_loadavg_content, parse_meminfo_content, parse_os_release_content,
+    parse_redhat_release_content, parse_ssh_connection_ip, parse_uptime_content,
+    run_command_with_timeout, to_gb_and_ratio,
 };
 use super::render::{
     build_verbose_items, default_modules, render_module_lines, resolve_modules,
@@ -48,6 +50,22 @@ fn format_uptime_formats_without_days() {
 fn parse_uptime_content_rejects_invalid_input() {
     assert_eq!(parse_uptime_content("not-a-number 0"), None);
     assert_eq!(parse_uptime_content(""), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn run_command_with_timeout_kills_slow_processes() {
+    let err = run_command_with_timeout("sh", &["-c", "sleep 1"], &[], 50).unwrap_err();
+    assert!(err.contains("timed out"));
+}
+
+#[test]
+fn parse_loadavg_content_reads_first_three_values() {
+    assert_eq!(
+        parse_loadavg_content("0.42 0.38 0.35 2/345 6789\n"),
+        Some("0.42 0.38 0.35".to_string())
+    );
+    assert_eq!(parse_loadavg_content("0.42 0.38"), None);
 }
 
 #[test]
@@ -190,6 +208,60 @@ fn parse_redhat_release_content_rejects_unexpected_format() {
         Some(("Rocky Linux".to_string(), "9.7 (Blue Onyx)".to_string()))
     );
     assert_eq!(parse_redhat_release_content("Rocky Linux 9.7"), None);
+}
+
+#[test]
+fn parse_lastlog_output_extracts_latest_entry() {
+    let output = "\
+Username         Port     From                                       Latest\n\
+admin            pts/0    10.10.1.15                                 Thu Mar 30 09:30:00 +0000 2026\n";
+
+    assert_eq!(
+        parse_lastlog_output(output),
+        Some(Some(
+            "Thu Mar 30 09:30:00 +0000 2026, from 10.10.1.15, via pts/0".to_string()
+        ))
+    );
+}
+
+#[test]
+fn parse_lastlog_output_handles_never_logged_in() {
+    let output = "\
+Username         Port     From                                       Latest\n\
+admin                                                         **Never logged in**\n";
+
+    assert_eq!(parse_lastlog_output(output), Some(None));
+}
+
+#[test]
+fn parse_lastb_output_summarizes_recent_failures() {
+    let output = "\
+admin    ssh:notty   10.10.1.20   Thu Mar 30 09:25 - 09:25  (00:00)\n\
+admin    ssh:notty   10.10.1.21   Thu Mar 30 09:20 - 09:20  (00:00)\n\
+btmp begins Thu Mar 30 00:00:00 2026\n";
+
+    assert_eq!(
+        parse_lastb_output(output),
+        Some(Some(
+            "2 recent failures, last from 10.10.1.20, via ssh:notty, at Thu Mar 30 09:25 - 09:25 (00:00)"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
+fn parse_package_update_outputs_count_packages() {
+    let apt_output = "\
+Listing...\n\
+bash/stable 5.2 amd64 [upgradable from: 5.1]\n\
+curl/stable 8.7 amd64 [upgradable from: 8.6]\n";
+    let dnf_output = "\
+Last metadata expiration check: 0:42:11 ago on Thu 30 Mar 2026 09:00:00 AM UTC.\n\
+bash.x86_64          5.2-1.el9          baseos\n\
+curl.x86_64          8.7-1.el9          appstream\n";
+
+    assert_eq!(parse_apt_upgradable_output(apt_output), 2);
+    assert_eq!(parse_dnf_check_update_output(dnf_output), 2);
 }
 
 #[test]
@@ -710,6 +782,7 @@ fn sample_snapshot() -> SystemSnapshot {
         login_user_count: 4,
         now_str_with_tz: "2026-01-15 09:30:00 +00:00".to_string(),
         uptime_str: "24 days, 18:42:11".to_string(),
+        load_average: "0.42 0.38 0.35".to_string(),
         os_name: "Rocky Linux".to_string(),
         os_version: "9.5".to_string(),
         kernel_version: "5.14.0-503.15.1.el9_5.x86_64".to_string(),
@@ -736,6 +809,19 @@ fn sample_snapshot() -> SystemSnapshot {
                 value: "/NFS => 1.72 TB/1.97 TB (87.47%)".to_string(),
             },
         ],
+        last_login: "Thu Mar 30 09:30:00 +0000 2026, from 10.10.1.15, via pts/0".to_string(),
+        failed_login: "none".to_string(),
+        service_items: vec![
+            RenderedItem {
+                label: "Service sshd:".to_string(),
+                value: "active".to_string(),
+            },
+            RenderedItem {
+                label: "Service chronyd:".to_string(),
+                value: "active".to_string(),
+            },
+        ],
+        update_summary: "2 package(s) via dnf".to_string(),
         diagnostics: SnapshotDiagnostics {
             degraded_modules: Vec::new(),
             issues: Vec::new(),
@@ -743,6 +829,11 @@ fn sample_snapshot() -> SystemSnapshot {
             network_source: "ip route/ip addr".to_string(),
             login_user_count_source: "linux utmp".to_string(),
             virtualization_source: "systemd-detect-virt".to_string(),
+            load_source: "/proc/loadavg".to_string(),
+            last_login_source: "lastlog".to_string(),
+            failed_login_source: "lastb".to_string(),
+            service_status_source: "systemctl is-active".to_string(),
+            updates_source: "dnf check-update --cacheonly".to_string(),
         },
     }
 }
