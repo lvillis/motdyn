@@ -21,27 +21,11 @@ pub(super) fn build_verbose_items(
     let mut items = vec![
         RenderedItem {
             label: "System config:".to_string(),
-            value: format!(
-                "{} ({})",
-                ctx.system_config_path,
-                if ctx.system_config_loaded {
-                    "loaded"
-                } else {
-                    "missing"
-                }
-            ),
+            value: format!("{} ({})", ctx.system_config_path, ctx.system_config_status),
         },
         RenderedItem {
             label: "User config:".to_string(),
-            value: format!(
-                "{} ({})",
-                ctx.user_config_path,
-                if ctx.user_config_loaded {
-                    "loaded"
-                } else {
-                    "missing"
-                }
-            ),
+            value: format!("{} ({})", ctx.user_config_path, ctx.user_config_status),
         },
         RenderedItem {
             label: "Module source:".to_string(),
@@ -185,6 +169,13 @@ pub(super) fn build_verbose_items(
         items.push(RenderedItem {
             label: "Probe notes:".to_string(),
             value: snapshot.diagnostics.notes.join(" | "),
+        });
+    }
+
+    if !ctx.config_notes.is_empty() {
+        items.push(RenderedItem {
+            label: "Config notes:".to_string(),
+            value: ctx.config_notes.join(" | "),
         });
     }
 

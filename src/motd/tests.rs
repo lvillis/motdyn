@@ -313,9 +313,10 @@ fn build_verbose_items_reports_degraded_modules_and_ignored_fields() {
         &MotdConfig::default(),
         &RenderContext {
             system_config_path: "/etc/motdyn/config.toml".into(),
-            system_config_loaded: false,
+            system_config_status: "missing".into(),
             user_config_path: "/root/.config/motdyn/config.toml".into(),
-            user_config_loaded: false,
+            user_config_status: "missing".into(),
+            config_notes: Vec::new(),
         },
         &ModuleSelection {
             modules: default_modules(),

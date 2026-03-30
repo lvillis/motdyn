@@ -105,11 +105,15 @@ fn run_motd(cli: &Cli) {
     let usr_cfg = load_config(&usr_cfg_path);
     let render_ctx = motd::RenderContext {
         system_config_path: sys_cfg_path.display().to_string(),
-        system_config_loaded: sys_cfg.is_some(),
+        system_config_status: sys_cfg.status_label().to_string(),
         user_config_path: usr_cfg_path.display().to_string(),
-        user_config_loaded: usr_cfg.is_some(),
+        user_config_status: usr_cfg.status_label().to_string(),
+        config_notes: [sys_cfg.note(), usr_cfg.note()]
+            .into_iter()
+            .flatten()
+            .collect(),
     };
-    let mut merged_cfg = merge_config(sys_cfg, usr_cfg);
+    let mut merged_cfg = merge_config(sys_cfg.config, usr_cfg.config);
 
     if cli.plain {
         merged_cfg.output.plain = Some(true);

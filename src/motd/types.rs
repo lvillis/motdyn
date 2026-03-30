@@ -41,9 +41,10 @@ pub(super) const MAX_WELCOME_BODY_BYTES: usize = 8 * 1024;
 #[derive(Debug, Clone)]
 pub struct RenderContext {
     pub system_config_path: String,
-    pub system_config_loaded: bool,
+    pub system_config_status: String,
     pub user_config_path: String,
-    pub user_config_loaded: bool,
+    pub user_config_status: String,
+    pub config_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
