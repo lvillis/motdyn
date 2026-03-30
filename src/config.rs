@@ -10,6 +10,7 @@ struct RawConfig {
     pub farewell: Option<String>,
     pub modules: Option<Vec<String>>,
     pub remote_welcome: Option<RemoteWelcomeConfig>,
+    pub output: Option<OutputConfig>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -22,12 +23,21 @@ pub struct RemoteWelcomeConfig {
     pub allow_http: Option<bool>,
 }
 
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct OutputConfig {
+    pub compact: Option<bool>,
+    pub plain: Option<bool>,
+    pub section_headers: Option<bool>,
+    pub hidden_fields: Option<Vec<String>>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MotdConfig {
     pub welcome: Option<String>,
     pub farewell: Option<String>,
     pub modules: Option<Vec<String>>,
     pub remote_welcome: RemoteWelcomeConfig,
+    pub output: OutputConfig,
 }
 
 pub fn load_config(path: &Path) -> Option<MotdConfig> {
@@ -42,6 +52,7 @@ pub fn load_config(path: &Path) -> Option<MotdConfig> {
         farewell: raw.farewell,
         modules: raw.modules,
         remote_welcome: raw.remote_welcome.unwrap_or_default(),
+        output: raw.output.unwrap_or_default(),
     })
 }
 
@@ -58,6 +69,7 @@ pub fn merge_config(sys_cfg: Option<MotdConfig>, usr_cfg: Option<MotdConfig>) ->
             final_cfg.modules = Some(modules);
         }
         merge_remote_welcome(&mut final_cfg.remote_welcome, u.remote_welcome);
+        merge_output(&mut final_cfg.output, u.output);
     }
     final_cfg
 }
@@ -80,6 +92,21 @@ fn merge_remote_welcome(target: &mut RemoteWelcomeConfig, source: RemoteWelcomeC
     }
     if let Some(allow_http) = source.allow_http {
         target.allow_http = Some(allow_http);
+    }
+}
+
+fn merge_output(target: &mut OutputConfig, source: OutputConfig) {
+    if let Some(compact) = source.compact {
+        target.compact = Some(compact);
+    }
+    if let Some(plain) = source.plain {
+        target.plain = Some(plain);
+    }
+    if let Some(section_headers) = source.section_headers {
+        target.section_headers = Some(section_headers);
+    }
+    if let Some(hidden_fields) = source.hidden_fields {
+        target.hidden_fields = Some(hidden_fields);
     }
 }
 
@@ -108,7 +135,7 @@ mod tests {
         let config_path = dir.path().join("config.toml");
         fs::write(
             &config_path,
-            "welcome = \"hi\"\nfarewell = \"bye\"\nmodules = [\"host\", \"time\"]\n[remote_welcome]\ntimeout_ms = 250\n",
+            "welcome = \"hi\"\nfarewell = \"bye\"\nmodules = [\"host\", \"time\"]\n[remote_welcome]\ntimeout_ms = 250\n[output]\ncompact = true\nhidden_fields = [\"source_ip\"]\n",
         )
         .unwrap();
 
@@ -120,6 +147,11 @@ mod tests {
             Some(&["host".to_string(), "time".to_string()][..])
         );
         assert_eq!(cfg.remote_welcome.timeout_ms, Some(250));
+        assert_eq!(cfg.output.compact, Some(true));
+        assert_eq!(
+            cfg.output.hidden_fields.as_deref(),
+            Some(&["source_ip".to_string()][..])
+        );
     }
 
     #[test]
@@ -140,6 +172,7 @@ mod tests {
                 allow_http: Some(false),
                 ..RemoteWelcomeConfig::default()
             },
+            output: OutputConfig::default(),
         };
         let usr = MotdConfig {
             welcome: Some("user".into()),
@@ -149,6 +182,10 @@ mod tests {
                 cache_ttl_secs: Some(60),
                 allow_http: Some(true),
                 ..RemoteWelcomeConfig::default()
+            },
+            output: OutputConfig {
+                compact: Some(true),
+                ..OutputConfig::default()
             },
         };
 
@@ -162,6 +199,7 @@ mod tests {
         assert_eq!(merged.remote_welcome.timeout_ms, Some(500));
         assert_eq!(merged.remote_welcome.cache_ttl_secs, Some(60));
         assert_eq!(merged.remote_welcome.allow_http, Some(true));
+        assert_eq!(merged.output.compact, Some(true));
     }
 
     #[test]

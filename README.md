@@ -44,6 +44,7 @@ Install for login shells:
 ```bash
 sudo motdyn install
 motdyn install --user
+motdyn install --user --target bash_profile
 ```
 
 Check status:
@@ -51,6 +52,7 @@ Check status:
 ```bash
 motdyn status
 motdyn status --user
+motdyn status --user --target zprofile
 ```
 
 ## What It Shows
@@ -107,7 +109,10 @@ Remove hooks with:
 ```bash
 sudo motdyn uninstall
 motdyn uninstall --user
+motdyn uninstall --user --target bash_profile
 ```
+
+User install blocks are guarded so `motdyn` only runs once even if multiple login profile files source each other.
 
 ## Usage
 
@@ -124,6 +129,9 @@ Commands:
 Global options:
 
 - `-v`, `--verbose`
+- `--plain`
+- `--compact`
+- `--section-headers`
 
 Without a subcommand, `motdyn` prints the current MOTD immediately.
 
@@ -157,6 +165,12 @@ cache_ttl_secs = 300
 cache_path = "~/.cache/motdyn/welcome.txt"
 follow_redirects = true
 allow_http = false
+
+[output]
+compact = false
+plain = false
+section_headers = false
+hidden_fields = ["source_ip", "nfs_disks"]
 ```
 
 Supported module names:
@@ -180,7 +194,8 @@ Notes:
 - if `modules` is omitted, the default built-in order is used.
 - if `modules` is an empty list, only the welcome and farewell text are shown.
 - remote welcome uses a local cache and falls back to stale cache or default text on failure.
-- `--verbose` shows config loading, module resolution, welcome source, cache state, and external command availability.
+- `--verbose` shows config loading, module resolution, output mode, probe sources, degraded modules, and fallback notes.
+- `hidden_fields` currently supports `main_interface`, `main_ipv4`, `source_ip`, `login_user_count`, `timezone`, `kernel_version`, `virtualization`, `swap`, and `nfs_disks`.
 
 ## Example Output
 

@@ -13,6 +13,15 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    #[arg(long, global = true)]
+    plain: bool,
+
+    #[arg(long, global = true)]
+    compact: bool,
+
+    #[arg(long, global = true)]
+    section_headers: bool,
+
     #[command(subcommand)]
     cmd: Option<Commands>,
 }
@@ -32,6 +41,10 @@ struct InstallArgs {
     /// Install only for the current user instead of system-wide.
     #[arg(long)]
     user: bool,
+
+    /// Explicit user profile target: profile, bash_profile, bash_login, or zprofile.
+    #[arg(long)]
+    target: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -39,6 +52,10 @@ struct UninstallArgs {
     /// Remove only the current user's install hook.
     #[arg(long)]
     user: bool,
+
+    /// Explicit user profile target: profile, bash_profile, bash_login, or zprofile.
+    #[arg(long)]
+    target: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -46,6 +63,10 @@ struct StatusArgs {
     /// Check only the current user's install hook.
     #[arg(long)]
     user: bool,
+
+    /// Explicit user profile target: profile, bash_profile, bash_login, or zprofile.
+    #[arg(long)]
+    target: Option<String>,
 }
 
 fn main() {
@@ -53,30 +74,30 @@ fn main() {
 
     match cli.cmd {
         Some(Commands::Install(args)) => {
-            if let Err(e) = installer::do_install(args.user) {
+            if let Err(e) = installer::do_install(args.user, args.target.as_deref()) {
                 eprintln!("Install failed: {}", e);
                 std::process::exit(1);
             }
             println!("Install successful!");
         }
         Some(Commands::Uninstall(args)) => {
-            if let Err(e) = installer::do_uninstall(args.user) {
+            if let Err(e) = installer::do_uninstall(args.user, args.target.as_deref()) {
                 eprintln!("Uninstall failed: {}", e);
                 std::process::exit(1);
             }
             println!("Uninstall successful!");
         }
         Some(Commands::Status(args)) => {
-            if let Err(e) = installer::do_status(args.user) {
+            if let Err(e) = installer::do_status(args.user, args.target.as_deref()) {
                 eprintln!("Status check failed: {}", e);
                 std::process::exit(1);
             }
         }
-        None => run_motd(cli.verbose),
+        None => run_motd(&cli),
     }
 }
 
-fn run_motd(verbose: bool) {
+fn run_motd(cli: &Cli) {
     let sys_cfg_path = Path::new("/etc/motdyn/config.toml");
     let usr_cfg_path = expand_tilde("~/.config/motdyn/config.toml");
 
@@ -88,7 +109,17 @@ fn run_motd(verbose: bool) {
         user_config_path: usr_cfg_path.display().to_string(),
         user_config_loaded: usr_cfg.is_some(),
     };
-    let merged_cfg = merge_config(sys_cfg, usr_cfg);
+    let mut merged_cfg = merge_config(sys_cfg, usr_cfg);
 
-    motd::render(verbose, &merged_cfg, &render_ctx);
+    if cli.plain {
+        merged_cfg.output.plain = Some(true);
+    }
+    if cli.compact {
+        merged_cfg.output.compact = Some(true);
+    }
+    if cli.section_headers {
+        merged_cfg.output.section_headers = Some(true);
+    }
+
+    motd::render(cli.verbose, &merged_cfg, &render_ctx);
 }

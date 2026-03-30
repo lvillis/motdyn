@@ -139,6 +139,7 @@ struct SystemSnapshot {
     memory: UsageSummary,
     swap: UsageSummary,
     disk_items: Vec<RenderedItem>,
+    diagnostics: SnapshotDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,6 +185,86 @@ struct WelcomeCacheEntry {
     body: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct SnapshotDiagnostics {
+    degraded_modules: Vec<ModuleKind>,
+    notes: Vec<String>,
+    os_source: String,
+    network_source: String,
+    login_user_count_source: String,
+    virtualization_source: String,
+}
+
+impl SnapshotDiagnostics {
+    fn degrade(&mut self, module: ModuleKind, note: impl Into<String>) {
+        if !self.degraded_modules.contains(&module) {
+            self.degraded_modules.push(module);
+        }
+        self.notes.push(note.into());
+    }
+
+    fn note(&mut self, note: impl Into<String>) {
+        self.notes.push(note.into());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum HiddenField {
+    MainInterface,
+    MainIpv4,
+    SourceIp,
+    LoginUserCount,
+    Timezone,
+    KernelVersion,
+    Virtualization,
+    Swap,
+    NfsDisks,
+}
+
+#[derive(Debug, Clone)]
+struct OutputSettings {
+    compact: bool,
+    plain: bool,
+    section_headers: bool,
+    hidden_fields: HashSet<HiddenField>,
+    ignored_hidden_fields: Vec<String>,
+}
+
+impl OutputSettings {
+    fn hidden(&self, field: HiddenField) -> bool {
+        self.hidden_fields.contains(&field)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionKind {
+    Identity,
+    Runtime,
+    System,
+    Storage,
+}
+
+impl SectionKind {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Identity => "Identity",
+            Self::Runtime => "Runtime",
+            Self::System => "System",
+            Self::Storage => "Storage",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PaintKind {
+    Label,
+    Header,
+    Cyan,
+    Yellow,
+    Green,
+    Magenta,
+}
+
 pub fn render(verbose: bool, cfg: &MotdConfig, ctx: &RenderContext) {
     for line in build_output(verbose, cfg, ctx) {
         println!("{}", line);
@@ -193,27 +274,38 @@ pub fn render(verbose: bool, cfg: &MotdConfig, ctx: &RenderContext) {
 fn build_output(verbose: bool, cfg: &MotdConfig, ctx: &RenderContext) -> Vec<String> {
     let welcome = resolve_welcome_text(cfg);
     let selection = resolve_modules(cfg);
+    let output = resolve_output_settings(cfg);
     let snapshot = collect_snapshot();
     let mut lines = Vec::new();
 
-    lines.push(String::new());
+    if !output.compact {
+        lines.push(String::new());
+    }
     lines.push(welcome.text.clone());
-    lines.push(String::new());
-    lines.extend(format_aligned_items(&render_module_items(
-        &selection.modules,
-        &snapshot,
-    )));
+    if !output.compact {
+        lines.push(String::new());
+    }
+    lines.extend(render_module_lines(&selection.modules, &snapshot, &output));
 
     if verbose {
-        lines.push(String::new());
-        lines.push("Verbose details:".bold().cyan().to_string());
-        lines.extend(format_aligned_items(&build_verbose_items(
-            cfg, ctx, &selection, &welcome,
-        )));
+        if !output.compact {
+            lines.push(String::new());
+        }
+        lines.push(paint("Verbose details:", PaintKind::Header, &output));
+        lines.extend(format_aligned_items(
+            &build_verbose_items(cfg, ctx, &selection, &welcome, &snapshot, &output),
+            &output,
+        ));
     }
 
-    lines.push(String::new());
-    lines.push(resolve_farewell_text(cfg).bold().cyan().to_string());
+    if !output.compact {
+        lines.push(String::new());
+    }
+    lines.push(paint(
+        resolve_farewell_text(cfg),
+        PaintKind::Header,
+        &output,
+    ));
     lines
 }
 
@@ -225,7 +317,9 @@ fn resolve_farewell_text(cfg: &MotdConfig) -> String {
 }
 
 fn collect_snapshot() -> SystemSnapshot {
-    let (os_name, os_version) = get_os_info();
+    let mut diagnostics = SnapshotDiagnostics::default();
+    let ((os_name, os_version), os_source) = get_os_info();
+    diagnostics.os_source = os_source.to_string();
     let now_str_with_tz = Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string();
     let uptime_str = parse_uptime().unwrap_or_else(|| "unknown".to_string());
     let kernel_version = read_first_line("/proc/sys/kernel/osrelease")
@@ -235,14 +329,70 @@ fn collect_snapshot() -> SystemSnapshot {
     let (cpu_brand, cpu_count) = parse_cpuinfo();
     let (mem_total, mem_free, swap_total, swap_free) = parse_meminfo();
     let (current_user, from_ip) = get_current_user_and_ip();
-    let login_user_count = get_logged_in_user_count();
-    let virt_info = detect_virtualization();
-    let main_iface = get_default_interface().unwrap_or_else(|| "unknown".to_string());
+    let (login_user_count, login_user_count_source) = get_logged_in_user_count();
+    diagnostics.login_user_count_source = login_user_count_source.to_string();
+    let (virt_info, virtualization_source) = detect_virtualization();
+    diagnostics.virtualization_source = virtualization_source.to_string();
+    diagnostics.network_source = "ip route/ip addr".to_string();
+
+    let main_iface = match get_default_interface() {
+        Ok(iface) => iface,
+        Err(err) => {
+            diagnostics.degrade(ModuleKind::Network, format!("network: {}", err));
+            "unknown".to_string()
+        }
+    };
     let main_ip = if main_iface == "unknown" {
         "unknown".to_string()
     } else {
-        get_interface_ipv4(&main_iface).unwrap_or_else(|| "unknown".to_string())
+        match get_interface_ipv4(&main_iface) {
+            Ok(ip) => ip,
+            Err(err) => {
+                diagnostics.degrade(ModuleKind::Network, format!("network: {}", err));
+                "unknown".to_string()
+            }
+        }
     };
+
+    if uptime_str == "unknown" {
+        diagnostics.degrade(
+            ModuleKind::Uptime,
+            "uptime: failed to read or parse /proc/uptime".to_string(),
+        );
+    }
+    if host_name == "Unknown host" {
+        diagnostics.degrade(
+            ModuleKind::Host,
+            "host: failed to read /proc/sys/kernel/hostname".to_string(),
+        );
+    }
+    if kernel_version == "Unknown kernel" {
+        diagnostics.degrade(
+            ModuleKind::Kernel,
+            "kernel: failed to read /proc/sys/kernel/osrelease".to_string(),
+        );
+    }
+    if os_source == "/proc/sys/kernel/ostype" {
+        diagnostics.degrade(
+            ModuleKind::Os,
+            "os: no release metadata found; using kernel fallback".to_string(),
+        );
+    }
+    if cpu_brand == "Unknown CPU" || cpu_count == 0 {
+        diagnostics.degrade(
+            ModuleKind::Cpu,
+            "cpu: /proc/cpuinfo did not yield a stable brand/core count".to_string(),
+        );
+    }
+    if mem_total == 0 {
+        diagnostics.degrade(
+            ModuleKind::Memory,
+            "memory: /proc/meminfo missing or unreadable".to_string(),
+        );
+    }
+    if from_ip == "unknown" {
+        diagnostics.note("user: SSH_CONNECTION missing; source IP shown as unknown".to_string());
+    }
 
     SystemSnapshot {
         host_name,
@@ -262,82 +412,123 @@ fn collect_snapshot() -> SystemSnapshot {
         memory: usage_summary(mem_total, mem_free),
         swap: usage_summary(swap_total, swap_free),
         disk_items: collect_disk_usage_items(),
+        diagnostics,
     }
 }
 
-fn render_module_items(modules: &[ModuleKind], snapshot: &SystemSnapshot) -> Vec<RenderedItem> {
-    let mut items = Vec::new();
+fn render_module_lines(
+    modules: &[ModuleKind],
+    snapshot: &SystemSnapshot,
+    settings: &OutputSettings,
+) -> Vec<String> {
+    let mut groups: Vec<(SectionKind, Vec<RenderedItem>)> = Vec::new();
 
     for module in modules {
-        match module {
-            ModuleKind::Host => items.push(RenderedItem {
-                label: "Host name:".to_string(),
-                value: snapshot.host_name.bright_yellow().to_string(),
-            }),
-            ModuleKind::Network => items.push(RenderedItem {
-                label: "Main NIC:".to_string(),
-                value: format!(
-                    "{} ({})",
-                    snapshot.main_iface.bright_cyan(),
-                    snapshot.main_ip.bright_cyan()
-                ),
-            }),
-            ModuleKind::User => items.push(RenderedItem {
-                label: "User info:".to_string(),
-                value: format!(
-                    "{} (from {}), {} user(s) logged in",
-                    snapshot.current_user.bright_cyan(),
-                    snapshot.from_ip.bright_cyan(),
-                    snapshot.login_user_count.to_string().bright_cyan()
-                ),
-            }),
-            ModuleKind::Time => items.push(RenderedItem {
-                label: "Current time (TZ):".to_string(),
-                value: snapshot.now_str_with_tz.bright_yellow().to_string(),
-            }),
-            ModuleKind::Uptime => items.push(RenderedItem {
-                label: "System uptime:".to_string(),
-                value: snapshot.uptime_str.bright_yellow().to_string(),
-            }),
-            ModuleKind::Os => items.push(RenderedItem {
-                label: "Operating system:".to_string(),
-                value: format!("{} {}", snapshot.os_name, snapshot.os_version)
-                    .bright_yellow()
-                    .to_string(),
-            }),
-            ModuleKind::Kernel => items.push(RenderedItem {
-                label: "Kernel version:".to_string(),
-                value: snapshot.kernel_version.bright_green().to_string(),
-            }),
-            ModuleKind::Virtualization => {
-                if let Some(virt) = &snapshot.virt_info {
-                    items.push(RenderedItem {
-                        label: "Virtualization:".to_string(),
-                        value: virt.bright_yellow().to_string(),
-                    });
-                }
-            }
-            ModuleKind::Cpu => items.push(RenderedItem {
-                label: "CPU:".to_string(),
-                value: format!(
-                    "{} ({} cores)",
-                    snapshot.cpu_brand.bright_magenta(),
-                    snapshot.cpu_count.to_string().bright_magenta()
-                ),
-            }),
-            ModuleKind::Memory => items.push(RenderedItem {
-                label: "Memory used/total:".to_string(),
-                value: format_usage(snapshot.memory),
-            }),
-            ModuleKind::Swap => items.push(RenderedItem {
-                label: "Swap used/total:".to_string(),
-                value: format_usage(snapshot.swap),
-            }),
-            ModuleKind::Disk => items.extend(snapshot.disk_items.clone()),
+        let items = render_module_items(*module, snapshot, settings);
+        if items.is_empty() {
+            continue;
         }
+
+        let section = module_section(*module);
+        if let Some((current_section, current_items)) = groups.last_mut() {
+            if *current_section == section {
+                current_items.extend(items);
+                continue;
+            }
+        }
+        groups.push((section, items));
     }
 
-    items
+    if !settings.section_headers {
+        let items = groups
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .collect::<Vec<_>>();
+        return format_aligned_items(&items, settings);
+    }
+
+    let mut lines = Vec::new();
+    for (idx, (section, items)) in groups.into_iter().enumerate() {
+        if idx > 0 && !settings.compact {
+            lines.push(String::new());
+        }
+        lines.push(paint(section.title(), PaintKind::Header, settings));
+        lines.extend(format_aligned_items(&items, settings));
+    }
+    lines
+}
+
+fn render_module_items(
+    module: ModuleKind,
+    snapshot: &SystemSnapshot,
+    settings: &OutputSettings,
+) -> Vec<RenderedItem> {
+    match module {
+        ModuleKind::Host => vec![RenderedItem {
+            label: "Host name:".to_string(),
+            value: paint(snapshot.host_name.clone(), PaintKind::Yellow, settings),
+        }],
+        ModuleKind::Network => render_network_items(snapshot, settings),
+        ModuleKind::User => render_user_items(snapshot, settings),
+        ModuleKind::Time => render_time_items(snapshot, settings),
+        ModuleKind::Uptime => vec![RenderedItem {
+            label: "System uptime:".to_string(),
+            value: paint(snapshot.uptime_str.clone(), PaintKind::Yellow, settings),
+        }],
+        ModuleKind::Os => vec![RenderedItem {
+            label: "Operating system:".to_string(),
+            value: paint(
+                format!("{} {}", snapshot.os_name, snapshot.os_version),
+                PaintKind::Yellow,
+                settings,
+            ),
+        }],
+        ModuleKind::Kernel => {
+            if settings.hidden(HiddenField::KernelVersion) {
+                Vec::new()
+            } else {
+                vec![RenderedItem {
+                    label: "Kernel version:".to_string(),
+                    value: paint(snapshot.kernel_version.clone(), PaintKind::Green, settings),
+                }]
+            }
+        }
+        ModuleKind::Virtualization => {
+            if settings.hidden(HiddenField::Virtualization) {
+                Vec::new()
+            } else if let Some(virt) = &snapshot.virt_info {
+                vec![RenderedItem {
+                    label: "Virtualization:".to_string(),
+                    value: paint(virt.clone(), PaintKind::Yellow, settings),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        ModuleKind::Cpu => vec![RenderedItem {
+            label: "CPU:".to_string(),
+            value: paint(
+                format!("{} ({} cores)", snapshot.cpu_brand, snapshot.cpu_count),
+                PaintKind::Magenta,
+                settings,
+            ),
+        }],
+        ModuleKind::Memory => vec![RenderedItem {
+            label: "Memory used/total:".to_string(),
+            value: format_usage(snapshot.memory),
+        }],
+        ModuleKind::Swap => {
+            if settings.hidden(HiddenField::Swap) {
+                Vec::new()
+            } else {
+                vec![RenderedItem {
+                    label: "Swap used/total:".to_string(),
+                    value: format_usage(snapshot.swap),
+                }]
+            }
+        }
+        ModuleKind::Disk => render_disk_items(snapshot, settings),
+    }
 }
 
 fn build_verbose_items(
@@ -345,6 +536,8 @@ fn build_verbose_items(
     ctx: &RenderContext,
     selection: &ModuleSelection,
     welcome: &WelcomeResolution,
+    snapshot: &SystemSnapshot,
+    output: &OutputSettings,
 ) -> Vec<RenderedItem> {
     let mut items = vec![
         RenderedItem {
@@ -391,6 +584,13 @@ fn build_verbose_items(
                 .join(", "),
         },
         RenderedItem {
+            label: "Output mode:".to_string(),
+            value: format!(
+                "compact={}, plain={}, section_headers={}",
+                output.compact, output.plain, output.section_headers
+            ),
+        },
+        RenderedItem {
             label: "Welcome source:".to_string(),
             value: welcome.source_detail.clone(),
         },
@@ -432,6 +632,22 @@ fn build_verbose_items(
                 yes_no(command_exists("systemd-detect-virt"))
             ),
         },
+        RenderedItem {
+            label: "OS source:".to_string(),
+            value: snapshot.diagnostics.os_source.clone(),
+        },
+        RenderedItem {
+            label: "Network source:".to_string(),
+            value: snapshot.diagnostics.network_source.clone(),
+        },
+        RenderedItem {
+            label: "Login count source:".to_string(),
+            value: snapshot.diagnostics.login_user_count_source.clone(),
+        },
+        RenderedItem {
+            label: "Virt source:".to_string(),
+            value: snapshot.diagnostics.virtualization_source.clone(),
+        },
     ];
 
     if let Some(url) = &welcome.url {
@@ -459,6 +675,26 @@ fn build_verbose_items(
         });
     }
 
+    if !output.ignored_hidden_fields.is_empty() {
+        items.push(RenderedItem {
+            label: "Ignored fields:".to_string(),
+            value: output.ignored_hidden_fields.join(", "),
+        });
+    }
+
+    if !snapshot.diagnostics.degraded_modules.is_empty() {
+        items.push(RenderedItem {
+            label: "Degraded modules:".to_string(),
+            value: snapshot
+                .diagnostics
+                .degraded_modules
+                .iter()
+                .map(|module| module.key())
+                .collect::<Vec<_>>()
+                .join(", "),
+        });
+    }
+
     if !welcome.warnings.is_empty() {
         items.push(RenderedItem {
             label: "Welcome notes:".to_string(),
@@ -466,22 +702,185 @@ fn build_verbose_items(
         });
     }
 
+    if !snapshot.diagnostics.notes.is_empty() {
+        items.push(RenderedItem {
+            label: "Probe notes:".to_string(),
+            value: snapshot.diagnostics.notes.join(" | "),
+        });
+    }
+
     items
 }
 
-fn format_aligned_items(items: &[RenderedItem]) -> Vec<String> {
+fn format_aligned_items(items: &[RenderedItem], settings: &OutputSettings) -> Vec<String> {
     let width = items.iter().map(|item| item.label.len()).max().unwrap_or(0);
     items
         .iter()
         .map(|item| {
             format!(
                 "{:width$} {}",
-                item.label.bright_white(),
+                paint(item.label.clone(), PaintKind::Label, settings),
                 item.value,
                 width = width
             )
         })
         .collect()
+}
+
+fn render_network_items(snapshot: &SystemSnapshot, settings: &OutputSettings) -> Vec<RenderedItem> {
+    let mut parts = Vec::new();
+    if !settings.hidden(HiddenField::MainInterface) {
+        parts.push(paint(
+            snapshot.main_iface.clone(),
+            PaintKind::Cyan,
+            settings,
+        ));
+    }
+    if !settings.hidden(HiddenField::MainIpv4) {
+        let ip = paint(snapshot.main_ip.clone(), PaintKind::Cyan, settings);
+        if parts.is_empty() {
+            parts.push(ip);
+        } else {
+            parts.push(format!("({})", ip));
+        }
+    }
+
+    if parts.is_empty() {
+        Vec::new()
+    } else {
+        vec![RenderedItem {
+            label: "Main NIC:".to_string(),
+            value: parts.join(" "),
+        }]
+    }
+}
+
+fn render_user_items(snapshot: &SystemSnapshot, settings: &OutputSettings) -> Vec<RenderedItem> {
+    let mut value = paint(snapshot.current_user.clone(), PaintKind::Cyan, settings);
+
+    if !settings.hidden(HiddenField::SourceIp) {
+        value.push_str(&format!(
+            " (from {})",
+            paint(snapshot.from_ip.clone(), PaintKind::Cyan, settings)
+        ));
+    }
+    if !settings.hidden(HiddenField::LoginUserCount) {
+        value.push_str(&format!(
+            ", {} user(s) logged in",
+            paint(
+                snapshot.login_user_count.to_string(),
+                PaintKind::Cyan,
+                settings,
+            )
+        ));
+    }
+
+    vec![RenderedItem {
+        label: "User info:".to_string(),
+        value,
+    }]
+}
+
+fn render_time_items(snapshot: &SystemSnapshot, settings: &OutputSettings) -> Vec<RenderedItem> {
+    let value = if settings.hidden(HiddenField::Timezone) {
+        snapshot
+            .now_str_with_tz
+            .rsplit_once(' ')
+            .map(|(time, _)| time.to_string())
+            .unwrap_or_else(|| snapshot.now_str_with_tz.clone())
+    } else {
+        snapshot.now_str_with_tz.clone()
+    };
+
+    vec![RenderedItem {
+        label: "Current time (TZ):".to_string(),
+        value: paint(value, PaintKind::Yellow, settings),
+    }]
+}
+
+fn render_disk_items(snapshot: &SystemSnapshot, settings: &OutputSettings) -> Vec<RenderedItem> {
+    snapshot
+        .disk_items
+        .iter()
+        .filter(|item| {
+            !(settings.hidden(HiddenField::NfsDisks)
+                && item.label.eq_ignore_ascii_case("Disk usage (nfs):"))
+        })
+        .cloned()
+        .collect()
+}
+
+fn module_section(module: ModuleKind) -> SectionKind {
+    match module {
+        ModuleKind::Host | ModuleKind::Network | ModuleKind::User => SectionKind::Identity,
+        ModuleKind::Time | ModuleKind::Uptime => SectionKind::Runtime,
+        ModuleKind::Os
+        | ModuleKind::Kernel
+        | ModuleKind::Virtualization
+        | ModuleKind::Cpu
+        | ModuleKind::Memory
+        | ModuleKind::Swap => SectionKind::System,
+        ModuleKind::Disk => SectionKind::Storage,
+    }
+}
+
+fn resolve_output_settings(cfg: &MotdConfig) -> OutputSettings {
+    let mut hidden_fields = HashSet::new();
+    let mut ignored_hidden_fields = Vec::new();
+
+    if let Some(fields) = cfg.output.hidden_fields.as_ref() {
+        for raw in fields {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match normalize_hidden_field_name(trimmed) {
+                Some(field) => {
+                    hidden_fields.insert(field);
+                }
+                None => ignored_hidden_fields.push(trimmed.to_string()),
+            }
+        }
+    }
+
+    OutputSettings {
+        compact: cfg.output.compact.unwrap_or(false),
+        plain: cfg.output.plain.unwrap_or(false),
+        section_headers: cfg.output.section_headers.unwrap_or(false),
+        hidden_fields,
+        ignored_hidden_fields,
+    }
+}
+
+fn normalize_hidden_field_name(name: &str) -> Option<HiddenField> {
+    match name.to_ascii_lowercase().as_str() {
+        "main_interface" | "interface" | "iface" => Some(HiddenField::MainInterface),
+        "main_ipv4" | "main_ip" | "ipv4" | "ip" => Some(HiddenField::MainIpv4),
+        "source_ip" | "from_ip" => Some(HiddenField::SourceIp),
+        "login_user_count" | "logged_in_users" | "user_count" => Some(HiddenField::LoginUserCount),
+        "timezone" | "tz" => Some(HiddenField::Timezone),
+        "kernel_version" | "kernel" => Some(HiddenField::KernelVersion),
+        "virtualization" | "virt" => Some(HiddenField::Virtualization),
+        "swap" => Some(HiddenField::Swap),
+        "nfs_disks" | "nfs" => Some(HiddenField::NfsDisks),
+        _ => None,
+    }
+}
+
+fn paint(text: impl Into<String>, kind: PaintKind, settings: &OutputSettings) -> String {
+    let text = text.into();
+    if settings.plain {
+        return text;
+    }
+
+    match kind {
+        PaintKind::Label => text.bright_white().to_string(),
+        PaintKind::Header => text.bold().cyan().to_string(),
+        PaintKind::Cyan => text.bright_cyan().to_string(),
+        PaintKind::Yellow => text.bright_yellow().to_string(),
+        PaintKind::Green => text.bright_green().to_string(),
+        PaintKind::Magenta => text.bright_magenta().to_string(),
+    }
 }
 
 fn format_usage(summary: UsageSummary) -> String {
@@ -923,14 +1322,14 @@ fn command_exists(command: &str) -> bool {
     env::split_paths(&paths).any(|dir| dir.join(command).is_file())
 }
 
-fn detect_virtualization() -> Option<String> {
+fn detect_virtualization() -> (Option<String>, &'static str) {
     if Path::new("/.dockerenv").exists() {
-        return Some("Docker".to_string());
+        return (Some("Docker".to_string()), "/.dockerenv");
     }
 
     if let Ok(content) = fs::read_to_string("/proc/1/cgroup") {
         if let Some(value) = detect_virtualization_from_cgroup(&content) {
-            return Some(value);
+            return (Some(value), "/proc/1/cgroup");
         }
     }
 
@@ -938,11 +1337,11 @@ fn detect_virtualization() -> Option<String> {
         if output.status.success() {
             let virt_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if virt_str != "none" && !virt_str.is_empty() {
-                return Some(virt_str);
+                return (Some(virt_str), "systemd-detect-virt");
             }
         }
     }
-    None
+    (None, "not detected")
 }
 
 fn parse_uptime() -> Option<String> {
@@ -965,15 +1364,18 @@ fn format_uptime(mut secs: u64) -> String {
     }
 }
 
-fn get_os_info() -> (String, String) {
+fn get_os_info() -> ((String, String), &'static str) {
     if let Some(r) = parse_redhat_release() {
-        return r;
+        return (r, "/etc/redhat-release");
     }
     if let Some(r) = parse_os_release() {
-        return r;
+        return (r, "/etc/os-release");
     }
     let fallback_os = read_first_line("/proc/sys/kernel/ostype").unwrap_or("Linux".to_string());
-    ("Linux".to_string(), fallback_os)
+    (
+        ("Linux".to_string(), fallback_os),
+        "/proc/sys/kernel/ostype",
+    )
 }
 
 fn parse_redhat_release() -> Option<(String, String)> {
@@ -1078,18 +1480,22 @@ fn get_current_user_and_ip() -> (String, String) {
 }
 
 #[cfg(target_os = "linux")]
-fn get_logged_in_user_count() -> usize {
-    count_logged_in_users_from_linux_utmp().unwrap_or_else(get_logged_in_user_count_via_libc)
+fn get_logged_in_user_count() -> (usize, &'static str) {
+    if let Some(count) = count_logged_in_users_from_linux_utmp() {
+        (count, "linux utmp")
+    } else {
+        (get_logged_in_user_count_via_libc(), "libc utmpx fallback")
+    }
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn get_logged_in_user_count() -> usize {
-    get_logged_in_user_count_via_libc()
+fn get_logged_in_user_count() -> (usize, &'static str) {
+    (get_logged_in_user_count_via_libc(), "libc utmpx")
 }
 
 #[cfg(not(unix))]
-fn get_logged_in_user_count() -> usize {
-    0
+fn get_logged_in_user_count() -> (usize, &'static str) {
+    (0, "unsupported")
 }
 
 #[cfg(unix)]
@@ -1209,10 +1615,7 @@ fn disk_usage_item(mount_path: &str, label: &str) -> Option<RenderedItem> {
         label: label.to_string(),
         value: format!(
             "{} => {}/{} ({:.2}%)",
-            mount_path.bright_yellow(),
-            used_str,
-            total_str,
-            ratio
+            mount_path, used_str, total_str, ratio
         ),
     })
 }
@@ -1275,32 +1678,41 @@ fn best_unit_scale(bytes: f64) -> (f64, &'static str) {
     }
 }
 
-fn get_default_interface() -> Option<String> {
+fn get_default_interface() -> Result<String, String> {
     let output = Command::new("ip")
         .arg("route")
         .arg("show")
         .arg("default")
         .output()
-        .ok()?;
+        .map_err(|err| format!("failed to run 'ip route show default': {}", err))?;
 
     if !output.status.success() {
-        return None;
+        return Err(format!(
+            "'ip route show default' exited with status {}",
+            output.status
+        ));
     }
 
-    parse_default_interface_output(&String::from_utf8_lossy(&output.stdout))
+    parse_default_interface_output(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        "no usable default route found in 'ip route show default' output".to_string()
+    })
 }
 
-fn get_interface_ipv4(iface: &str) -> Option<String> {
+fn get_interface_ipv4(iface: &str) -> Result<String, String> {
     let output = Command::new("ip")
         .args(["-o", "-4", "addr", "show", "dev", iface])
         .output()
-        .ok()?;
+        .map_err(|err| format!("failed to run 'ip -o -4 addr show dev {}': {}", iface, err))?;
 
     if !output.status.success() {
-        return None;
+        return Err(format!(
+            "'ip -o -4 addr show dev {}' exited with status {}",
+            iface, output.status
+        ));
     }
 
     parse_interface_ipv4_output(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| format!("no IPv4 address found for interface '{}'", iface))
 }
 
 fn detect_virtualization_from_cgroup(content: &str) -> Option<String> {
@@ -1416,6 +1828,27 @@ mod tests {
     fn parse_uptime_content_rejects_invalid_input() {
         assert_eq!(parse_uptime_content("not-a-number 0"), None);
         assert_eq!(parse_uptime_content(""), None);
+    }
+
+    #[test]
+    fn resolve_output_settings_normalizes_hidden_fields_and_ignores_unknowns() {
+        let cfg = MotdConfig {
+            output: crate::config::OutputConfig {
+                compact: Some(true),
+                plain: Some(true),
+                section_headers: Some(true),
+                hidden_fields: Some(vec!["source_ip".into(), "nfs".into(), "bogus".into()]),
+            },
+            ..MotdConfig::default()
+        };
+
+        let settings = resolve_output_settings(&cfg);
+        assert!(settings.compact);
+        assert!(settings.plain);
+        assert!(settings.section_headers);
+        assert!(settings.hidden(HiddenField::SourceIp));
+        assert!(settings.hidden(HiddenField::NfsDisks));
+        assert_eq!(settings.ignored_hidden_fields, vec!["bogus".to_string()]);
     }
 
     #[test]
@@ -1581,6 +2014,116 @@ default dev broken\n";
             Some("LXC".to_string())
         );
         assert_eq!(detect_virtualization_from_cgroup("0::/"), None);
+    }
+
+    #[test]
+    fn render_module_lines_applies_hidden_fields_and_plain_output() {
+        let mut hidden = HashSet::new();
+        hidden.insert(HiddenField::SourceIp);
+        hidden.insert(HiddenField::Timezone);
+        hidden.insert(HiddenField::NfsDisks);
+        let settings = OutputSettings {
+            compact: true,
+            plain: true,
+            section_headers: false,
+            hidden_fields: hidden,
+            ignored_hidden_fields: Vec::new(),
+        };
+
+        let lines = render_module_lines(
+            &[
+                ModuleKind::User,
+                ModuleKind::Time,
+                ModuleKind::Disk,
+                ModuleKind::Virtualization,
+            ],
+            &sample_snapshot(),
+            &settings,
+        );
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("admin, 4 user(s) logged in"));
+        assert!(!rendered.contains("10.10.1.15"));
+        assert!(rendered.contains("2026-01-15 09:30:00"));
+        assert!(!rendered.contains("+00:00"));
+        assert!(rendered.contains("Disk usage (root):"));
+        assert!(!rendered.contains("Disk usage (nfs):"));
+        assert!(!rendered.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn render_module_lines_inserts_section_headers_when_enabled() {
+        let settings = OutputSettings {
+            compact: false,
+            plain: true,
+            section_headers: true,
+            hidden_fields: HashSet::new(),
+            ignored_hidden_fields: Vec::new(),
+        };
+
+        let lines = render_module_lines(
+            &[ModuleKind::Host, ModuleKind::Time, ModuleKind::Disk],
+            &sample_snapshot(),
+            &settings,
+        );
+
+        assert!(lines.iter().any(|line| line == "Identity"));
+        assert!(lines.iter().any(|line| line == "Runtime"));
+        assert!(lines.iter().any(|line| line == "Storage"));
+        assert!(lines.iter().any(|line| line.is_empty()));
+    }
+
+    #[test]
+    fn build_verbose_items_reports_degraded_modules_and_ignored_fields() {
+        let mut snapshot = sample_snapshot();
+        snapshot
+            .diagnostics
+            .degrade(ModuleKind::Network, "network: ip command unavailable");
+        snapshot
+            .diagnostics
+            .note("user: SSH_CONNECTION missing; source IP shown as unknown");
+
+        let output = OutputSettings {
+            compact: false,
+            plain: true,
+            section_headers: false,
+            hidden_fields: HashSet::new(),
+            ignored_hidden_fields: vec!["bogus".to_string()],
+        };
+        let items = build_verbose_items(
+            &MotdConfig::default(),
+            &RenderContext {
+                system_config_path: "/etc/motdyn/config.toml".into(),
+                system_config_loaded: false,
+                user_config_path: "/root/.config/motdyn/config.toml".into(),
+                user_config_loaded: false,
+            },
+            &ModuleSelection {
+                modules: default_modules(),
+                ignored: Vec::new(),
+                source: ModuleSource::Default,
+            },
+            &WelcomeResolution {
+                text: DEFAULT_WELCOME.to_string(),
+                source: WelcomeSource::Default,
+                source_detail: "default welcome".to_string(),
+                url: None,
+                settings: resolve_remote_welcome_settings(&MotdConfig::default()),
+                warnings: Vec::new(),
+            },
+            &snapshot,
+            &output,
+        );
+
+        assert!(items
+            .iter()
+            .any(|item| item.label == "Degraded modules:" && item.value.contains("network")));
+        assert!(items
+            .iter()
+            .any(|item| item.label == "Ignored fields:" && item.value.contains("bogus")));
+        assert!(items
+            .iter()
+            .any(|item| item.label == "Probe notes:" && item.value.contains("SSH_CONNECTION")));
     }
 
     #[test]
@@ -1819,5 +2362,52 @@ default dev broken\n";
             )
         };
         file.write_all(bytes).unwrap();
+    }
+
+    fn sample_snapshot() -> SystemSnapshot {
+        SystemSnapshot {
+            host_name: "prod-hpc-01".to_string(),
+            main_iface: "bond0".to_string(),
+            main_ip: "10.10.8.24".to_string(),
+            current_user: "admin".to_string(),
+            from_ip: "10.10.1.15".to_string(),
+            login_user_count: 4,
+            now_str_with_tz: "2026-01-15 09:30:00 +00:00".to_string(),
+            uptime_str: "24 days, 18:42:11".to_string(),
+            os_name: "Rocky Linux".to_string(),
+            os_version: "9.5".to_string(),
+            kernel_version: "5.14.0-503.15.1.el9_5.x86_64".to_string(),
+            virt_info: Some("kvm".to_string()),
+            cpu_brand: "2x AMD EPYC 9654".to_string(),
+            cpu_count: 192,
+            memory: UsageSummary {
+                used_gb: 384.0,
+                total_gb: 1536.0,
+                ratio: 25.0,
+            },
+            swap: UsageSummary {
+                used_gb: 0.0,
+                total_gb: 64.0,
+                ratio: 0.0,
+            },
+            disk_items: vec![
+                RenderedItem {
+                    label: "Disk usage (root):".to_string(),
+                    value: "/ => 1.20 TB/7.68 TB (15.62%)".to_string(),
+                },
+                RenderedItem {
+                    label: "Disk usage (nfs):".to_string(),
+                    value: "/NFS => 1.72 TB/1.97 TB (87.47%)".to_string(),
+                },
+            ],
+            diagnostics: SnapshotDiagnostics {
+                degraded_modules: Vec::new(),
+                notes: Vec::new(),
+                os_source: "/etc/redhat-release".to_string(),
+                network_source: "ip route/ip addr".to_string(),
+                login_user_count_source: "linux utmp".to_string(),
+                virtualization_source: "systemd-detect-virt".to_string(),
+            },
+        }
     }
 }
