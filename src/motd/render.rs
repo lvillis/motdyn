@@ -249,6 +249,10 @@ pub(super) fn render_module_lines(
         groups.push((section, items));
     }
 
+    if settings.compact {
+        return format_compact_groups(groups, settings);
+    }
+
     if !settings.section_headers {
         let items = groups
             .into_iter()
@@ -284,6 +288,90 @@ pub(super) fn format_aligned_items(
             )
         })
         .collect()
+}
+
+fn format_compact_groups(
+    groups: Vec<(SectionKind, Vec<RenderedItem>)>,
+    settings: &OutputSettings,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for (idx, (section, items)) in groups.into_iter().enumerate() {
+        if items.is_empty() {
+            continue;
+        }
+
+        if settings.section_headers {
+            if idx > 0 {
+                lines.push(String::new());
+            }
+            lines.push(paint(section.title(), PaintKind::Header, settings));
+            lines.extend(format_compact_section_body(
+                None,
+                &compact_clauses(section, &items),
+                settings,
+            ));
+            continue;
+        }
+
+        let prefix = format!("{:<11}", format!("{}:", section.title()));
+        lines.extend(format_compact_section_body(
+            Some(paint(prefix, PaintKind::Header, settings)),
+            &compact_clauses(section, &items),
+            settings,
+        ));
+    }
+
+    lines
+}
+
+fn format_compact_section_body(
+    prefix: Option<String>,
+    clauses: &[String],
+    _settings: &OutputSettings,
+) -> Vec<String> {
+    let width = terminal_width_hint();
+    let separator = "; ";
+    let mut lines = Vec::new();
+    let prefix_width = prefix
+        .as_ref()
+        .map(|value| visible_width(value))
+        .unwrap_or(0);
+    let continuation_prefix = " ".repeat(prefix_width);
+    let mut current = prefix.unwrap_or_default();
+    let mut current_width = visible_width(&current);
+
+    for clause in clauses {
+        let clause_width = visible_width(clause);
+        let separator_width = if current_width == prefix_width {
+            0
+        } else {
+            separator.len()
+        };
+
+        if current_width > prefix_width && current_width + separator_width + clause_width > width {
+            lines.push(current);
+            current = continuation_prefix.clone();
+            current_width = prefix_width;
+        }
+
+        if current_width > prefix_width {
+            current.push_str(separator);
+            current_width += separator_width;
+        } else if prefix_width > 0 {
+            current.push(' ');
+            current_width += 1;
+        }
+
+        current.push_str(clause);
+        current_width += clause_width;
+    }
+
+    if !current.trim().is_empty() {
+        lines.push(current);
+    }
+
+    lines
 }
 
 pub(super) fn resolve_output_settings(cfg: &MotdConfig) -> OutputSettings {
@@ -673,4 +761,94 @@ fn paint_failed_login(value: String, settings: &OutputSettings) -> String {
         "unavailable" => paint(value, PaintKind::Yellow, settings),
         _ => paint(value, PaintKind::Yellow, settings),
     }
+}
+
+fn terminal_width_hint() -> usize {
+    env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(72, 160))
+        .unwrap_or(100)
+}
+
+fn visible_width(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut width = 0usize;
+    let mut idx = 0usize;
+
+    while idx < bytes.len() {
+        if bytes[idx] == 0x1b {
+            idx += 1;
+            if idx < bytes.len() && bytes[idx] == b'[' {
+                idx += 1;
+                while idx < bytes.len() {
+                    let byte = bytes[idx];
+                    idx += 1;
+                    if byte.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+
+        if let Some(ch) = text[idx..].chars().next() {
+            width += 1;
+            idx += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    width
+}
+
+fn compact_clauses(section: SectionKind, items: &[RenderedItem]) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| compact_clause(section, item))
+        .collect()
+}
+
+fn compact_clause(section: SectionKind, item: &RenderedItem) -> String {
+    match item.label.as_str() {
+        "Host name:" => item.value.clone(),
+        "Main NIC:" => item.value.clone(),
+        "User info:" => item.value.clone(),
+        "Current time (TZ):" => item.value.clone(),
+        "System uptime:" => format!("up {}", item.value),
+        "Load average:" => format!("load {}", item.value),
+        "Operating system:" => item.value.clone(),
+        "Kernel version:" => format!("kernel {}", item.value),
+        "Virtualization:" => format!("virt {}", item.value),
+        "CPU:" => item.value.clone(),
+        "Memory used/total:" => format!("mem {}", item.value),
+        "Swap used/total:" => format!("swap {}", item.value),
+        "Disk usage (root):" => format!("root {}", normalize_disk_compact_value(&item.value)),
+        "Disk usage (nfs):" => format!("nfs {}", normalize_disk_compact_value(&item.value)),
+        "Last login:" => format!("last {}", item.value),
+        "Failed login:" => format!("failed {}", item.value),
+        "Pending updates:" => format!("updates {}", item.value),
+        label if label.starts_with("Service ") => {
+            format!(
+                "{} {}",
+                label.trim_start_matches("Service ").trim_end_matches(':'),
+                item.value
+            )
+        }
+        _ => match section {
+            SectionKind::Identity
+            | SectionKind::Runtime
+            | SectionKind::System
+            | SectionKind::Storage
+            | SectionKind::Operations => item.value.clone(),
+        },
+    }
+}
+
+fn normalize_disk_compact_value(value: &str) -> String {
+    value
+        .split_once("=>")
+        .map(|(_, rest)| rest.trim().to_string())
+        .unwrap_or_else(|| value.to_string())
 }

@@ -113,6 +113,7 @@ motdyn uninstall --user --target bash_profile
 ```
 
 User install blocks are guarded so `motdyn` only runs once even if multiple login profile files source each other.
+Installed login hooks run `motdyn --compact` so the login MOTD stays dense and screen-friendly by default.
 
 ## Usage
 

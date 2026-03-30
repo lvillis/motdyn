@@ -377,9 +377,11 @@ fn render_module_lines_applies_hidden_fields_and_plain_output() {
     assert!(!rendered.contains("10.10.1.15"));
     assert!(rendered.contains("2026-01-15 09:30:00"));
     assert!(!rendered.contains("+00:00"));
-    assert!(rendered.contains("Disk usage (root):"));
+    assert!(rendered.contains("Storage:"));
+    assert!(rendered.contains("root 1.20 TB/7.68 TB (15.62%)"));
     assert!(!rendered.contains("Disk usage (nfs):"));
     assert!(!rendered.contains('\u{1b}'));
+    assert!(lines.len() <= 4);
 }
 
 #[test]
@@ -402,6 +404,38 @@ fn render_module_lines_inserts_section_headers_when_enabled() {
     assert!(lines.iter().any(|line| line == "Runtime"));
     assert!(lines.iter().any(|line| line == "Storage"));
     assert!(lines.iter().any(|line| line.is_empty()));
+}
+
+#[test]
+fn render_module_lines_compact_layout_packs_multiple_items_per_line() {
+    let settings = OutputSettings {
+        compact: true,
+        plain: true,
+        section_headers: false,
+        hidden_fields: HashSet::new(),
+        ignored_hidden_fields: Vec::new(),
+    };
+
+    let lines = render_module_lines(
+        &[
+            ModuleKind::Host,
+            ModuleKind::Network,
+            ModuleKind::User,
+            ModuleKind::Time,
+            ModuleKind::Uptime,
+            ModuleKind::Load,
+        ],
+        &sample_snapshot(),
+        &settings,
+    );
+
+    let rendered = lines.join("\n");
+    assert!(rendered.contains("Identity:"));
+    assert!(rendered.contains("prod-hpc-01"));
+    assert!(rendered.contains("bond0 (10.10.8.24)"));
+    assert!(rendered.contains("Runtime:"));
+    assert!(rendered.contains("load 0.42 0.38 0.35"));
+    assert!(lines.len() <= 3);
 }
 
 #[test]
