@@ -62,8 +62,10 @@ pub(super) fn build_verbose_items(
             value: match welcome.source {
                 WelcomeSource::Default => "default".to_string(),
                 WelcomeSource::Literal => "literal".to_string(),
+                WelcomeSource::LocalFile => "local file".to_string(),
                 WelcomeSource::RemoteFresh => "remote fetch".to_string(),
                 WelcomeSource::CacheFresh => "fresh cache".to_string(),
+                WelcomeSource::CacheRevalidated => "cache revalidated".to_string(),
                 WelcomeSource::CacheStale => "stale cache fallback".to_string(),
             },
         },
@@ -161,14 +163,25 @@ pub(super) fn build_verbose_items(
     if !welcome.warnings.is_empty() {
         items.push(RenderedItem {
             label: "Welcome notes:".to_string(),
-            value: welcome.warnings.join(" | "),
+            value: welcome
+                .warnings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | "),
         });
     }
 
-    if !snapshot.diagnostics.notes.is_empty() {
+    if !snapshot.diagnostics.issues.is_empty() {
         items.push(RenderedItem {
             label: "Probe notes:".to_string(),
-            value: snapshot.diagnostics.notes.join(" | "),
+            value: snapshot
+                .diagnostics
+                .issues
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | "),
         });
     }
 

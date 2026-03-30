@@ -44,7 +44,7 @@ struct InstallArgs {
 
     /// Explicit user profile target: profile, bash_profile, bash_login, or zprofile.
     #[arg(long)]
-    target: Option<String>,
+    target: Option<installer::UserProfileTarget>,
 }
 
 #[derive(Args, Debug)]
@@ -55,7 +55,7 @@ struct UninstallArgs {
 
     /// Explicit user profile target: profile, bash_profile, bash_login, or zprofile.
     #[arg(long)]
-    target: Option<String>,
+    target: Option<installer::UserProfileTarget>,
 }
 
 #[derive(Args, Debug)]
@@ -66,7 +66,7 @@ struct StatusArgs {
 
     /// Explicit user profile target: profile, bash_profile, bash_login, or zprofile.
     #[arg(long)]
-    target: Option<String>,
+    target: Option<installer::UserProfileTarget>,
 }
 
 fn main() {
@@ -74,21 +74,21 @@ fn main() {
 
     match cli.cmd {
         Some(Commands::Install(args)) => {
-            if let Err(e) = installer::do_install(args.user, args.target.as_deref()) {
+            if let Err(e) = installer::do_install(args.user, args.target) {
                 eprintln!("Install failed: {}", e);
                 std::process::exit(1);
             }
             println!("Install successful!");
         }
         Some(Commands::Uninstall(args)) => {
-            if let Err(e) = installer::do_uninstall(args.user, args.target.as_deref()) {
+            if let Err(e) = installer::do_uninstall(args.user, args.target) {
                 eprintln!("Uninstall failed: {}", e);
                 std::process::exit(1);
             }
             println!("Uninstall successful!");
         }
         Some(Commands::Status(args)) => {
-            if let Err(e) = installer::do_status(args.user, args.target.as_deref()) {
+            if let Err(e) = installer::do_status(args.user, args.target) {
                 eprintln!("Status check failed: {}", e);
                 std::process::exit(1);
             }
@@ -126,4 +126,22 @@ fn run_motd(cli: &Cli) {
     }
 
     motd::render(cli.verbose, &merged_cfg, &render_ctx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clap_parses_user_profile_target_values() {
+        let cli = Cli::try_parse_from(["motdyn", "install", "--user", "--target", "bash_profile"])
+            .expect("cli should parse");
+
+        match cli.cmd {
+            Some(Commands::Install(args)) => {
+                assert_eq!(args.target, Some(installer::UserProfileTarget::BashProfile));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }

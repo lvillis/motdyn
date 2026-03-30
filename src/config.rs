@@ -3,18 +3,24 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::de::{self, Deserializer};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     welcome: Option<String>,
+    #[serde(default)]
+    welcome_sources: Option<Vec<String>>,
     farewell: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_module_list")]
     modules: Option<Vec<String>>,
     remote_welcome: Option<RemoteWelcomeConfig>,
     output: Option<OutputConfig>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteWelcomeConfig {
     pub enabled: Option<bool>,
     pub timeout_ms: Option<u64>,
@@ -25,20 +31,120 @@ pub struct RemoteWelcomeConfig {
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     pub compact: Option<bool>,
     pub plain: Option<bool>,
     pub section_headers: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_hidden_field_list")]
     pub hidden_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct MotdConfig {
     pub welcome: Option<String>,
+    pub welcome_sources: Option<Vec<String>>,
     pub farewell: Option<String>,
     pub modules: Option<Vec<String>>,
     pub remote_welcome: RemoteWelcomeConfig,
     pub output: OutputConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigModuleName {
+    Host,
+    Network,
+    User,
+    Time,
+    Uptime,
+    Os,
+    Kernel,
+    Virtualization,
+    Cpu,
+    Memory,
+    Swap,
+    Disk,
+}
+
+impl ConfigModuleName {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "host" | "hostname" => Some(Self::Host),
+            "network" | "net" | "nic" => Some(Self::Network),
+            "user" | "users" | "login" => Some(Self::User),
+            "time" | "clock" | "datetime" => Some(Self::Time),
+            "uptime" => Some(Self::Uptime),
+            "os" | "system" => Some(Self::Os),
+            "kernel" => Some(Self::Kernel),
+            "virtualization" | "virt" | "container" => Some(Self::Virtualization),
+            "cpu" => Some(Self::Cpu),
+            "memory" | "mem" => Some(Self::Memory),
+            "swap" => Some(Self::Swap),
+            "disk" | "disks" | "filesystem" | "fs" => Some(Self::Disk),
+            _ => None,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Network => "network",
+            Self::User => "user",
+            Self::Time => "time",
+            Self::Uptime => "uptime",
+            Self::Os => "os",
+            Self::Kernel => "kernel",
+            Self::Virtualization => "virtualization",
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+            Self::Swap => "swap",
+            Self::Disk => "disk",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigHiddenFieldName {
+    MainInterface,
+    MainIpv4,
+    SourceIp,
+    LoginUserCount,
+    Timezone,
+    KernelVersion,
+    Virtualization,
+    Swap,
+    NfsDisks,
+}
+
+impl ConfigHiddenFieldName {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "main_interface" | "interface" | "iface" => Some(Self::MainInterface),
+            "main_ipv4" | "main_ip" | "ipv4" | "ip" => Some(Self::MainIpv4),
+            "source_ip" | "from_ip" => Some(Self::SourceIp),
+            "login_user_count" | "logged_in_users" | "user_count" => Some(Self::LoginUserCount),
+            "timezone" | "tz" => Some(Self::Timezone),
+            "kernel_version" | "kernel" => Some(Self::KernelVersion),
+            "virtualization" | "virt" => Some(Self::Virtualization),
+            "swap" => Some(Self::Swap),
+            "nfs_disks" | "nfs" => Some(Self::NfsDisks),
+            _ => None,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::MainInterface => "main_interface",
+            Self::MainIpv4 => "main_ipv4",
+            Self::SourceIp => "source_ip",
+            Self::LoginUserCount => "login_user_count",
+            Self::Timezone => "timezone",
+            Self::KernelVersion => "kernel_version",
+            Self::Virtualization => "virtualization",
+            Self::Swap => "swap",
+            Self::NfsDisks => "nfs_disks",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +296,9 @@ pub fn merge_config(sys_cfg: Option<MotdConfig>, usr_cfg: Option<MotdConfig>) ->
         if let Some(welcome) = user_cfg.welcome {
             final_cfg.welcome = Some(welcome);
         }
+        if let Some(welcome_sources) = user_cfg.welcome_sources {
+            final_cfg.welcome_sources = Some(welcome_sources);
+        }
         if let Some(farewell) = user_cfg.farewell {
             final_cfg.farewell = Some(farewell);
         }
@@ -209,8 +318,9 @@ fn validate_and_normalize(raw: RawConfig, path: &Path) -> Result<MotdConfig, Con
     let output = normalize_output(raw.output.unwrap_or_default());
     let config = MotdConfig {
         welcome: normalize_optional_text(raw.welcome),
+        welcome_sources: normalize_ordered_string_list(raw.welcome_sources),
         farewell: normalize_optional_text(raw.farewell),
-        modules: normalize_string_list(raw.modules),
+        modules: raw.modules,
         remote_welcome,
         output,
     };
@@ -223,6 +333,54 @@ fn validate_and_normalize(raw: RawConfig, path: &Path) -> Result<MotdConfig, Con
             issues,
         })
     }
+}
+
+fn deserialize_module_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_canonical_list(deserializer, "module", |raw| {
+        ConfigModuleName::parse(raw).map(ConfigModuleName::key)
+    })
+}
+
+fn deserialize_hidden_field_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_canonical_list(deserializer, "hidden field", |raw| {
+        ConfigHiddenFieldName::parse(raw).map(ConfigHiddenFieldName::key)
+    })
+}
+
+fn deserialize_canonical_list<'de, D, F>(
+    deserializer: D,
+    kind: &'static str,
+    normalize: F,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+    F: Fn(&str) -> Option<&'static str>,
+{
+    let raw_values = Option::<Vec<String>>::deserialize(deserializer)?;
+    let Some(raw_values) = raw_values else {
+        return Ok(None);
+    };
+
+    let mut normalized = Vec::new();
+    for value in raw_values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let canonical = normalize(trimmed)
+            .ok_or_else(|| de::Error::custom(format!("unsupported {} '{}'", kind, trimmed)))?;
+        if !normalized.iter().any(|entry: &String| entry == canonical) {
+            normalized.push(canonical.to_string());
+        }
+    }
+
+    Ok(Some(normalized))
 }
 
 fn normalize_remote_welcome(
@@ -249,8 +407,7 @@ fn normalize_remote_welcome(
     config
 }
 
-fn normalize_output(mut config: OutputConfig) -> OutputConfig {
-    config.hidden_fields = normalize_string_list(config.hidden_fields);
+fn normalize_output(config: OutputConfig) -> OutputConfig {
     config
 }
 
@@ -301,7 +458,7 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     })
 }
 
-fn normalize_string_list(values: Option<Vec<String>>) -> Option<Vec<String>> {
+fn normalize_ordered_string_list(values: Option<Vec<String>>) -> Option<Vec<String>> {
     values.map(|values| {
         let mut normalized = Vec::new();
         for value in values {
@@ -404,13 +561,22 @@ mod tests {
         let config_path = dir.path().join("config.toml");
         fs::write(
             &config_path,
-            "welcome = \"  hi  \"\nfarewell = \"  \"\nmodules = [\" host \", \"host\", \"\", \"time\"]\n[output]\nhidden_fields = [\" source_ip \", \"source_ip\", \"  \", \"nfs\"]\n",
+            "welcome = \"  hi  \"\nwelcome_sources = [\" ./motd.txt \", \"\", \"https://example.com/motd.txt\", \"./motd.txt\"]\nfarewell = \"  \"\nmodules = [\" host \", \"hostname\", \"\", \"time\"]\n[output]\nhidden_fields = [\" source_ip \", \"from_ip\", \"  \", \"nfs\"]\n",
         )
         .unwrap();
 
         let loaded = load_config(&config_path);
         let cfg = loaded.config.expect("config should load");
         assert_eq!(cfg.welcome.as_deref(), Some("hi"));
+        assert_eq!(
+            cfg.welcome_sources.as_deref(),
+            Some(
+                &[
+                    "./motd.txt".to_string(),
+                    "https://example.com/motd.txt".to_string()
+                ][..]
+            )
+        );
         assert_eq!(cfg.farewell, None);
         assert_eq!(
             cfg.modules.as_deref(),
@@ -418,14 +584,63 @@ mod tests {
         );
         assert_eq!(
             cfg.output.hidden_fields.as_deref(),
-            Some(&["source_ip".to_string(), "nfs".to_string()][..])
+            Some(&["source_ip".to_string(), "nfs_disks".to_string()][..])
         );
+    }
+
+    #[test]
+    fn load_config_rejects_unknown_top_level_fields() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "unknown = true\n").unwrap();
+
+        let loaded = load_config(&config_path);
+        match loaded.status {
+            ConfigLoadStatus::Invalid(ConfigLoadError::Parse { message, .. }) => {
+                assert!(message.contains("unknown field"));
+            }
+            other => panic!("unexpected status: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_config_rejects_invalid_module_names() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "modules = [\"bogus\"]\n").unwrap();
+
+        let loaded = load_config(&config_path);
+        match loaded.status {
+            ConfigLoadStatus::Invalid(ConfigLoadError::Parse { message, .. }) => {
+                assert!(message.contains("unsupported module 'bogus'"));
+            }
+            other => panic!("unexpected status: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_config_rejects_invalid_hidden_fields() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "[output]\nhidden_fields = [\"bogus\"]\n").unwrap();
+
+        let loaded = load_config(&config_path);
+        match loaded.status {
+            ConfigLoadStatus::Invalid(ConfigLoadError::Parse { message, .. }) => {
+                assert!(message.contains("unsupported hidden field 'bogus'"));
+            }
+            other => panic!("unexpected status: {other:?}"),
+        }
     }
 
     #[test]
     fn merge_config_prefers_user_values() {
         let sys = MotdConfig {
             welcome: Some("system".into()),
+            welcome_sources: Some(vec![
+                "https://system.example/motd.txt".into(),
+                "./system-banner.txt".into(),
+            ]),
             farewell: Some("sys bye".into()),
             modules: Some(vec!["host".into(), "memory".into()]),
             remote_welcome: RemoteWelcomeConfig {
@@ -437,6 +652,10 @@ mod tests {
         };
         let usr = MotdConfig {
             welcome: Some("user".into()),
+            welcome_sources: Some(vec![
+                "./user-banner.txt".into(),
+                "https://user.example/motd.txt".into(),
+            ]),
             farewell: None,
             modules: Some(vec!["time".into(), "disk".into()]),
             remote_welcome: RemoteWelcomeConfig {
@@ -452,6 +671,15 @@ mod tests {
 
         let merged = merge_config(Some(sys), Some(usr));
         assert_eq!(merged.welcome.as_deref(), Some("user"));
+        assert_eq!(
+            merged.welcome_sources.as_deref(),
+            Some(
+                &[
+                    "./user-banner.txt".to_string(),
+                    "https://user.example/motd.txt".to_string()
+                ][..]
+            )
+        );
         assert_eq!(merged.farewell.as_deref(), Some("sys bye"));
         assert_eq!(
             merged.modules.as_deref(),

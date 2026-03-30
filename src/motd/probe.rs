@@ -13,7 +13,8 @@ use std::ffi::CString;
 use std::mem::MaybeUninit;
 
 use super::types::{
-    LinuxUtmpRecord, ModuleKind, RenderedItem, SnapshotDiagnostics, SystemSnapshot, UsageSummary,
+    LinuxUtmpRecord, ModuleKind, NetworkProbeError, ProbeIssue, RenderedItem, SnapshotDiagnostics,
+    SystemSnapshot, UsageSummary,
 };
 
 pub(super) fn collect_snapshot() -> SystemSnapshot {
@@ -38,7 +39,7 @@ pub(super) fn collect_snapshot() -> SystemSnapshot {
     let main_iface = match get_default_interface() {
         Ok(iface) => iface,
         Err(err) => {
-            diagnostics.degrade(ModuleKind::Network, format!("network: {}", err));
+            diagnostics.degrade(ModuleKind::Network, ProbeIssue::Network(err));
             "unknown".to_string()
         }
     };
@@ -48,50 +49,32 @@ pub(super) fn collect_snapshot() -> SystemSnapshot {
         match get_interface_ipv4(&main_iface) {
             Ok(ip) => ip,
             Err(err) => {
-                diagnostics.degrade(ModuleKind::Network, format!("network: {}", err));
+                diagnostics.degrade(ModuleKind::Network, ProbeIssue::Network(err));
                 "unknown".to_string()
             }
         }
     };
 
     if uptime_str == "unknown" {
-        diagnostics.degrade(
-            ModuleKind::Uptime,
-            "uptime: failed to read or parse /proc/uptime".to_string(),
-        );
+        diagnostics.degrade(ModuleKind::Uptime, ProbeIssue::UptimeReadFailed);
     }
     if host_name == "Unknown host" {
-        diagnostics.degrade(
-            ModuleKind::Host,
-            "host: failed to read /proc/sys/kernel/hostname".to_string(),
-        );
+        diagnostics.degrade(ModuleKind::Host, ProbeIssue::HostReadFailed);
     }
     if kernel_version == "Unknown kernel" {
-        diagnostics.degrade(
-            ModuleKind::Kernel,
-            "kernel: failed to read /proc/sys/kernel/osrelease".to_string(),
-        );
+        diagnostics.degrade(ModuleKind::Kernel, ProbeIssue::KernelReadFailed);
     }
     if os_source == "/proc/sys/kernel/ostype" {
-        diagnostics.degrade(
-            ModuleKind::Os,
-            "os: no release metadata found; using kernel fallback".to_string(),
-        );
+        diagnostics.degrade(ModuleKind::Os, ProbeIssue::OsMetadataMissing);
     }
     if cpu_brand == "Unknown CPU" || cpu_count == 0 {
-        diagnostics.degrade(
-            ModuleKind::Cpu,
-            "cpu: /proc/cpuinfo did not yield a stable brand/core count".to_string(),
-        );
+        diagnostics.degrade(ModuleKind::Cpu, ProbeIssue::CpuInfoUnstable);
     }
     if mem_total == 0 {
-        diagnostics.degrade(
-            ModuleKind::Memory,
-            "memory: /proc/meminfo missing or unreadable".to_string(),
-        );
+        diagnostics.degrade(ModuleKind::Memory, ProbeIssue::MemoryInfoMissing);
     }
     if from_ip == "unknown" {
-        diagnostics.note("user: SSH_CONNECTION missing; source IP shown as unknown".to_string());
+        diagnostics.note(ProbeIssue::SshConnectionMissing);
     }
 
     SystemSnapshot {
@@ -570,39 +553,43 @@ fn kb_to_gb(kb: u64) -> f64 {
     kb as f64 / 1024.0 / 1024.0
 }
 
-fn get_default_interface() -> Result<String, String> {
+fn get_default_interface() -> Result<String, NetworkProbeError> {
     let output = Command::new("ip")
         .arg("route")
         .arg("show")
         .arg("default")
         .output()
-        .map_err(|err| format!("failed to run 'ip route show default': {}", err))?;
+        .map_err(|err| NetworkProbeError::DefaultRouteCommand(err.to_string()))?;
 
     if !output.status.success() {
-        return Err(format!(
-            "'ip route show default' exited with status {}",
-            output.status
+        return Err(NetworkProbeError::DefaultRouteStatus(
+            output.status.to_string(),
         ));
     }
 
-    parse_default_interface_output(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
-        "no usable default route found in 'ip route show default' output".to_string()
-    })
+    parse_default_interface_output(&String::from_utf8_lossy(&output.stdout))
+        .ok_or(NetworkProbeError::DefaultRouteParse)
 }
 
-fn get_interface_ipv4(iface: &str) -> Result<String, String> {
+fn get_interface_ipv4(iface: &str) -> Result<String, NetworkProbeError> {
     let output = Command::new("ip")
         .args(["-o", "-4", "addr", "show", "dev", iface])
         .output()
-        .map_err(|err| format!("failed to run 'ip -o -4 addr show dev {}': {}", iface, err))?;
+        .map_err(|err| NetworkProbeError::InterfaceIpv4Command {
+            iface: iface.to_string(),
+            message: err.to_string(),
+        })?;
 
     if !output.status.success() {
-        return Err(format!(
-            "'ip -o -4 addr show dev {}' exited with status {}",
-            iface, output.status
-        ));
+        return Err(NetworkProbeError::InterfaceIpv4Status {
+            iface: iface.to_string(),
+            status: output.status.to_string(),
+        });
     }
 
-    parse_interface_ipv4_output(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| format!("no IPv4 address found for interface '{}'", iface))
+    parse_interface_ipv4_output(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        NetworkProbeError::InterfaceIpv4Parse {
+            iface: iface.to_string(),
+        }
+    })
 }

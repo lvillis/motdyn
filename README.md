@@ -154,7 +154,11 @@ User config overrides system config.
 Example:
 
 ```toml
-welcome = "https://example.com/motd.txt"
+welcome_sources = [
+  "./motd.txt",
+  "file:///etc/motdyn/welcome.txt",
+  "https://example.com/motd.txt",
+]
 farewell = "Have a nice day!"
 modules = ["host", "network", "user", "time", "uptime", "os", "kernel", "virtualization", "cpu", "memory", "swap", "disk"]
 
@@ -190,10 +194,12 @@ Supported module names:
 
 Notes:
 
-- `welcome` may be a literal string or a URL.
+- `welcome` is the single-source shortcut. `welcome_sources` is preferred when you want ordered fallback.
+- each welcome source may be a literal string, a local path, a `file://` URL, or an `http`/`https` URL.
+- sources are tried in order until one yields usable content.
 - if `modules` is omitted, the default built-in order is used.
 - if `modules` is an empty list, only the welcome and farewell text are shown.
-- remote welcome uses a local cache and falls back to stale cache or default text on failure.
+- remote welcome uses a local cache, sends `If-None-Match` / `If-Modified-Since` when cache metadata is available, and falls back to stale cache or default text on failure.
 - `--verbose` shows config loading, module resolution, output mode, probe sources, degraded modules, and fallback notes.
 - `hidden_fields` currently supports `main_interface`, `main_ipv4`, `source_ip`, `login_user_count`, `timezone`, `kernel_version`, `virtualization`, `swap`, and `nfs_disks`.
 

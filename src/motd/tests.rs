@@ -21,9 +21,9 @@ use super::render::{
     resolve_output_settings,
 };
 use super::types::{
-    HiddenField, ModuleKind, ModuleSelection, ModuleSource, OutputSettings, RenderContext,
-    RenderedItem, SnapshotDiagnostics, SystemSnapshot, UsageSummary, WelcomeCacheEntry,
-    WelcomeResolution, WelcomeSource, DEFAULT_WELCOME,
+    HiddenField, ModuleKind, ModuleSelection, ModuleSource, NetworkProbeError, OutputSettings,
+    ProbeIssue, RenderContext, RenderedItem, SnapshotDiagnostics, SystemSnapshot, UsageSummary,
+    WelcomeCacheEntry, WelcomeResolution, WelcomeSource, DEFAULT_WELCOME,
 };
 #[cfg(target_os = "linux")]
 use super::types::{LinuxUtmpExitStatus, LinuxUtmpRecord, LinuxUtmpTimeVal32};
@@ -120,6 +120,46 @@ fn fetch_welcome_text_returns_literal_strings() {
     let resolution = resolve_welcome_text(&cfg);
     assert_eq!(resolution.source, WelcomeSource::Literal);
     assert_eq!(resolution.text, "Plain text");
+}
+
+#[test]
+fn fetch_welcome_text_reads_local_file_sources() {
+    let dir = tempdir().unwrap();
+    let welcome_path = dir.path().join("welcome.txt");
+    fs::write(&welcome_path, "Local welcome\n").unwrap();
+
+    let cfg = MotdConfig {
+        welcome_sources: Some(vec![welcome_path.display().to_string()]),
+        ..MotdConfig::default()
+    };
+    let resolution = resolve_welcome_text(&cfg);
+    let expected_url = welcome_path.display().to_string();
+
+    assert_eq!(resolution.source, WelcomeSource::LocalFile);
+    assert_eq!(resolution.text, "Local welcome\n");
+    assert_eq!(resolution.url.as_deref(), Some(expected_url.as_str()));
+}
+
+#[test]
+fn fetch_welcome_text_uses_next_source_after_failure() {
+    let dir = tempdir().unwrap();
+    let missing_path = dir.path().join("missing.txt");
+
+    let cfg = MotdConfig {
+        welcome_sources: Some(vec![
+            missing_path.display().to_string(),
+            "Fallback literal".into(),
+        ]),
+        ..MotdConfig::default()
+    };
+    let resolution = resolve_welcome_text(&cfg);
+
+    assert_eq!(resolution.source, WelcomeSource::Literal);
+    assert_eq!(resolution.text, "Fallback literal");
+    assert!(resolution.warnings.iter().any(|warning| matches!(
+        warning,
+        super::types::WelcomeIssue::LocalFileRead { path, .. } if path == &missing_path
+    )));
 }
 
 #[test]
@@ -295,12 +335,13 @@ fn render_module_lines_inserts_section_headers_when_enabled() {
 #[test]
 fn build_verbose_items_reports_degraded_modules_and_ignored_fields() {
     let mut snapshot = sample_snapshot();
-    snapshot
-        .diagnostics
-        .degrade(ModuleKind::Network, "network: ip command unavailable");
-    snapshot
-        .diagnostics
-        .note("user: SSH_CONNECTION missing; source IP shown as unknown");
+    snapshot.diagnostics.degrade(
+        ModuleKind::Network,
+        ProbeIssue::Network(NetworkProbeError::DefaultRouteCommand(
+            "ip command unavailable".to_string(),
+        )),
+    );
+    snapshot.diagnostics.note(ProbeIssue::SshConnectionMissing);
 
     let output = OutputSettings {
         compact: false,
@@ -353,6 +394,8 @@ fn write_and_read_welcome_cache_round_trip() {
     let entry = WelcomeCacheEntry {
         url: "https://example.com/motd.txt".into(),
         fetched_at_secs: 123,
+        etag: Some("\"abc123\"".into()),
+        last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT".into()),
         body: "hello\nworld".into(),
     };
 
@@ -361,6 +404,8 @@ fn write_and_read_welcome_cache_round_trip() {
 
     assert_eq!(restored.url, entry.url);
     assert_eq!(restored.fetched_at_secs, entry.fetched_at_secs);
+    assert_eq!(restored.etag, entry.etag);
+    assert_eq!(restored.last_modified, entry.last_modified);
     assert_eq!(restored.body, entry.body);
 }
 
@@ -373,6 +418,8 @@ fn resolve_welcome_uses_fresh_cache_before_fetch() {
         &WelcomeCacheEntry {
             url: "https://example.com/motd.txt".into(),
             fetched_at_secs: current_unix_secs(),
+            etag: None,
+            last_modified: None,
             body: "cached welcome".into(),
         },
     )
@@ -401,6 +448,8 @@ fn resolve_welcome_uses_stale_cache_when_remote_disabled() {
         &WelcomeCacheEntry {
             url: "https://example.com/motd.txt".into(),
             fetched_at_secs: 1,
+            etag: None,
+            last_modified: None,
             body: "stale welcome".into(),
         },
     )
@@ -423,7 +472,7 @@ fn resolve_welcome_uses_stale_cache_when_remote_disabled() {
     assert!(resolution
         .warnings
         .iter()
-        .any(|warning| warning.contains("disabled")));
+        .any(|warning| warning.to_string().contains("disabled")));
 }
 
 #[test]
@@ -447,7 +496,7 @@ fn resolve_welcome_reports_malformed_cache() {
     assert!(resolution
         .warnings
         .iter()
-        .any(|warning| warning.contains("malformed")));
+        .any(|warning| warning.to_string().contains("malformed")));
 }
 
 #[test]
@@ -459,6 +508,8 @@ fn resolve_welcome_cache_matches_normalized_url() {
         &WelcomeCacheEntry {
             url: "https://example.com/".into(),
             fetched_at_secs: current_unix_secs(),
+            etag: None,
+            last_modified: None,
             body: "cached normalized welcome".into(),
         },
     )
@@ -523,7 +574,72 @@ fn remote_welcome_rejects_non_success_status_without_cache() {
     assert!(resolution
         .warnings
         .iter()
-        .any(|warning| warning.contains("HTTP 404")));
+        .any(|warning| warning.to_string().contains("HTTP 404")));
+}
+
+#[test]
+fn remote_welcome_revalidates_stale_cache_on_http_304() {
+    let dir = tempdir().unwrap();
+    let cache_path = dir.path().join("welcome.cache");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let welcome_url = format!("http://{}/motd.txt", addr);
+    let request_etag = "\"abc123\"".to_string();
+    let request_last_modified = "Mon, 01 Jan 2024 00:00:00 GMT".to_string();
+    write_welcome_cache(
+        &cache_path,
+        &WelcomeCacheEntry {
+            url: welcome_url.clone(),
+            fetched_at_secs: 1,
+            etag: Some(request_etag.clone()),
+            last_modified: Some(request_last_modified.clone()),
+            body: "cached welcome".into(),
+        },
+    )
+    .unwrap();
+    let cache_path_for_cfg = cache_path.display().to_string();
+    let server = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0_u8; 1024];
+            let bytes_read = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..bytes_read]).to_ascii_lowercase();
+            assert!(request.contains("if-none-match: \"abc123\""));
+            assert!(request.contains("if-modified-since: mon, 01 jan 2024 00:00:00 gmt"));
+
+            let response = concat!(
+                "HTTP/1.1 304 Not Modified\r\n",
+                "ETag: \"abc123\"\r\n",
+                "Last-Modified: Mon, 01 Jan 2024 00:00:00 GMT\r\n",
+                "Content-Length: 0\r\n",
+                "Connection: close\r\n",
+                "\r\n"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+
+    let cfg = MotdConfig {
+        welcome: Some(welcome_url),
+        remote_welcome: RemoteWelcomeConfig {
+            allow_http: Some(true),
+            timeout_ms: Some(500),
+            cache_ttl_secs: Some(0),
+            cache_path: Some(cache_path_for_cfg),
+            ..RemoteWelcomeConfig::default()
+        },
+        ..MotdConfig::default()
+    };
+
+    let resolution = resolve_welcome_text(&cfg);
+    server.join().unwrap();
+
+    assert_eq!(resolution.source, WelcomeSource::CacheRevalidated);
+    assert_eq!(resolution.text, "cached welcome");
+
+    let restored = read_welcome_cache(&cache_path).unwrap().unwrap();
+    assert_eq!(restored.etag, Some(request_etag));
+    assert_eq!(restored.last_modified, Some(request_last_modified));
+    assert!(restored.fetched_at_secs > 1);
 }
 
 #[cfg(target_os = "linux")]
@@ -622,7 +738,7 @@ fn sample_snapshot() -> SystemSnapshot {
         ],
         diagnostics: SnapshotDiagnostics {
             degraded_modules: Vec::new(),
-            notes: Vec::new(),
+            issues: Vec::new(),
             os_source: "/etc/redhat-release".to_string(),
             network_source: "ip route/ip addr".to_string(),
             login_user_count_source: "linux utmp".to_string(),

@@ -5,6 +5,8 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use clap::ValueEnum;
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -22,12 +24,34 @@ const USER_BLOCK_END: &str = "# <<< motdyn <<<";
 
 type Result<T> = std::result::Result<T, InstallerError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UserProfileTarget {
+    #[value(name = "profile")]
+    Profile,
+    #[value(name = "bash_profile")]
+    BashProfile,
+    #[value(name = "bash_login")]
+    BashLogin,
+    #[value(name = "zprofile")]
+    Zprofile,
+}
+
+impl UserProfileTarget {
+    fn filename(self) -> &'static str {
+        match self {
+            Self::Profile => ".profile",
+            Self::BashProfile => ".bash_profile",
+            Self::BashLogin => ".bash_login",
+            Self::Zprofile => ".zprofile",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum InstallerError {
     TargetRequiresUserMode,
     MissingSystemProfileDir(PathBuf),
     MissingHome,
-    UnsupportedUserTarget(String),
     IncompleteManagedBlock(PathBuf),
     Io {
         action: &'static str,
@@ -50,11 +74,6 @@ impl fmt::Display for InstallerError {
             Self::MissingHome => {
                 write!(f, "HOME is not set, cannot resolve user profile path")
             }
-            Self::UnsupportedUserTarget(target) => write!(
-                f,
-                "unsupported user install target '{}'. Use one of: profile, bash_profile, bash_login, zprofile",
-                target
-            ),
             Self::IncompleteManagedBlock(path) => write!(
                 f,
                 "detected incomplete motdyn managed block in '{}'; clean it up manually first",
@@ -78,7 +97,7 @@ enum UserBlockState {
     Incomplete,
 }
 
-pub fn do_install(user: bool, target: Option<&str>) -> Result<()> {
+pub fn do_install(user: bool, target: Option<UserProfileTarget>) -> Result<()> {
     if user {
         install_user(target)
     } else {
@@ -89,7 +108,7 @@ pub fn do_install(user: bool, target: Option<&str>) -> Result<()> {
     }
 }
 
-pub fn do_uninstall(user: bool, target: Option<&str>) -> Result<()> {
+pub fn do_uninstall(user: bool, target: Option<UserProfileTarget>) -> Result<()> {
     if user {
         uninstall_user(target)
     } else {
@@ -100,7 +119,7 @@ pub fn do_uninstall(user: bool, target: Option<&str>) -> Result<()> {
     }
 }
 
-pub fn do_status(user: bool, target: Option<&str>) -> Result<()> {
+pub fn do_status(user: bool, target: Option<UserProfileTarget>) -> Result<()> {
     if user {
         print_user_status(target)?;
     } else {
@@ -156,7 +175,7 @@ fn install_system() -> Result<()> {
     Ok(())
 }
 
-fn install_user(target: Option<&str>) -> Result<()> {
+fn install_user(target: Option<UserProfileTarget>) -> Result<()> {
     let home = user_home_dir()?;
     let targets = resolve_user_targets(&home, target)?;
     let mut planned_updates = Vec::new();
@@ -190,7 +209,7 @@ fn uninstall_system() -> Result<()> {
     Ok(())
 }
 
-fn uninstall_user(target: Option<&str>) -> Result<()> {
+fn uninstall_user(target: Option<UserProfileTarget>) -> Result<()> {
     let home = user_home_dir()?;
     let mut planned_updates = Vec::new();
 
@@ -229,7 +248,7 @@ fn print_system_status() {
     }
 }
 
-fn print_user_status(target: Option<&str>) -> Result<()> {
+fn print_user_status(target: Option<UserProfileTarget>) -> Result<()> {
     let home = user_home_dir()?;
     let checked_paths = resolve_user_targets(&home, target)?;
     let mut installed_paths = Vec::new();
@@ -284,23 +303,15 @@ fn user_profile_paths(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn resolve_user_targets(home: &Path, target: Option<&str>) -> Result<Vec<PathBuf>> {
+fn resolve_user_targets(home: &Path, target: Option<UserProfileTarget>) -> Result<Vec<PathBuf>> {
     match target {
         Some(value) => Ok(vec![resolve_user_target_path(home, value)?]),
         None => Ok(user_install_targets(home)),
     }
 }
 
-fn resolve_user_target_path(home: &Path, target: &str) -> Result<PathBuf> {
-    let normalized = match target.trim() {
-        "profile" | ".profile" => ".profile",
-        "bash_profile" | ".bash_profile" => ".bash_profile",
-        "bash_login" | ".bash_login" => ".bash_login",
-        "zprofile" | ".zprofile" => ".zprofile",
-        other => return Err(InstallerError::UnsupportedUserTarget(other.to_string())),
-    };
-
-    Ok(home.join(normalized))
+fn resolve_user_target_path(home: &Path, target: UserProfileTarget) -> Result<PathBuf> {
+    Ok(home.join(target.filename()))
 }
 
 fn user_install_targets(home: &Path) -> Vec<PathBuf> {
@@ -507,18 +518,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_user_target_path_accepts_known_aliases() {
+    fn resolve_user_target_path_accepts_known_targets() {
         let home = tempfile::tempdir().unwrap();
 
         assert_eq!(
-            resolve_user_target_path(home.path(), "profile").unwrap(),
+            resolve_user_target_path(home.path(), UserProfileTarget::Profile).unwrap(),
             home.path().join(".profile")
         );
         assert_eq!(
-            resolve_user_target_path(home.path(), ".bash_profile").unwrap(),
+            resolve_user_target_path(home.path(), UserProfileTarget::BashProfile).unwrap(),
             home.path().join(".bash_profile")
         );
-        assert!(resolve_user_target_path(home.path(), "bashrc").is_err());
     }
 
     #[test]
@@ -531,8 +541,10 @@ mod tests {
     }
 
     #[test]
-    fn installer_error_formats_unsupported_target() {
-        let err = InstallerError::UnsupportedUserTarget("bashrc".to_string());
-        assert!(err.to_string().contains("bashrc"));
+    fn user_profile_target_returns_expected_filename() {
+        assert_eq!(UserProfileTarget::Profile.filename(), ".profile");
+        assert_eq!(UserProfileTarget::BashProfile.filename(), ".bash_profile");
+        assert_eq!(UserProfileTarget::BashLogin.filename(), ".bash_login");
+        assert_eq!(UserProfileTarget::Zprofile.filename(), ".zprofile");
     }
 }
