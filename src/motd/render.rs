@@ -2,12 +2,15 @@ use colored::Colorize;
 use std::collections::HashSet;
 use std::env;
 
+#[cfg(unix)]
+use libc::geteuid;
+
 use crate::config::MotdConfig;
 
 use super::types::{
-    HiddenField, ModuleKind, ModuleSelection, ModuleSource, OutputSettings, PaintKind,
-    RenderContext, RenderedItem, SectionKind, SystemSnapshot, UsageSummary, WelcomeResolution,
-    WelcomeSource,
+    HiddenField, ModuleKind, ModuleProfile, ModuleSelection, ModuleSource, OutputSettings,
+    PaintKind, RenderContext, RenderedItem, SectionKind, SystemSnapshot, UsageSummary, ViewerRole,
+    WelcomeResolution, WelcomeSource,
 };
 
 pub(super) fn build_verbose_items(
@@ -30,7 +33,10 @@ pub(super) fn build_verbose_items(
         RenderedItem {
             label: "Module source:".to_string(),
             value: match selection.source {
-                ModuleSource::Default => "default order".to_string(),
+                ModuleSource::Default => "automatic full profile".to_string(),
+                ModuleSource::RoleProfile => "automatic basic profile".to_string(),
+                ModuleSource::ProfileFull => "forced full profile".to_string(),
+                ModuleSource::ProfileBasic => "forced basic profile".to_string(),
                 ModuleSource::Configured => "configured order".to_string(),
                 ModuleSource::FallbackDefault => {
                     "configured list had no valid modules; using defaults".to_string()
@@ -402,12 +408,35 @@ pub(super) fn resolve_output_settings(cfg: &MotdConfig) -> OutputSettings {
     }
 }
 
-pub(super) fn resolve_modules(cfg: &MotdConfig) -> ModuleSelection {
+pub(super) fn resolve_modules(
+    cfg: &MotdConfig,
+    viewer_role: ViewerRole,
+    profile: ModuleProfile,
+) -> ModuleSelection {
     let Some(configured) = cfg.modules.as_ref() else {
-        return ModuleSelection {
-            modules: default_modules(),
-            ignored: Vec::new(),
-            source: ModuleSource::Default,
+        return match profile {
+            ModuleProfile::Auto => match viewer_role {
+                ViewerRole::Root => ModuleSelection {
+                    modules: default_modules(),
+                    ignored: Vec::new(),
+                    source: ModuleSource::Default,
+                },
+                ViewerRole::User => ModuleSelection {
+                    modules: basic_modules(),
+                    ignored: Vec::new(),
+                    source: ModuleSource::RoleProfile,
+                },
+            },
+            ModuleProfile::Full => ModuleSelection {
+                modules: default_modules(),
+                ignored: Vec::new(),
+                source: ModuleSource::ProfileFull,
+            },
+            ModuleProfile::Basic => ModuleSelection {
+                modules: basic_modules(),
+                ignored: Vec::new(),
+                source: ModuleSource::ProfileBasic,
+            },
         };
     };
 
@@ -466,6 +495,28 @@ pub(super) fn default_modules() -> Vec<ModuleKind> {
         ModuleKind::Swap,
         ModuleKind::Disk,
     ]
+}
+
+pub(super) fn basic_modules() -> Vec<ModuleKind> {
+    vec![
+        ModuleKind::Host,
+        ModuleKind::Network,
+        ModuleKind::User,
+        ModuleKind::Time,
+        ModuleKind::Uptime,
+        ModuleKind::Load,
+    ]
+}
+
+pub(super) fn current_viewer_role() -> ViewerRole {
+    #[cfg(unix)]
+    unsafe {
+        if geteuid() == 0 {
+            return ViewerRole::Root;
+        }
+    }
+
+    ViewerRole::User
 }
 
 pub(super) fn paint(text: impl Into<String>, kind: PaintKind, settings: &OutputSettings) -> String {

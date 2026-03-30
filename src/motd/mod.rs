@@ -8,22 +8,27 @@ mod welcome;
 use crate::config::MotdConfig;
 use probe::collect_snapshot;
 use render::{
-    build_verbose_items, format_aligned_items, paint, render_module_lines, resolve_modules,
-    resolve_output_settings,
+    build_verbose_items, current_viewer_role, format_aligned_items, paint, render_module_lines,
+    resolve_modules, resolve_output_settings,
 };
-pub use types::RenderContext;
+pub use types::{ModuleProfile, RenderContext};
 use types::{PaintKind, DEFAULT_FAREWELL};
 use welcome::resolve_welcome_text;
 
-pub fn render(verbose: bool, cfg: &MotdConfig, ctx: &RenderContext) {
-    for line in build_output(verbose, cfg, ctx) {
+pub fn render(verbose: bool, profile: ModuleProfile, cfg: &MotdConfig, ctx: &RenderContext) {
+    for line in build_output(verbose, profile, cfg, ctx) {
         println!("{}", line);
     }
 }
 
-fn build_output(verbose: bool, cfg: &MotdConfig, ctx: &RenderContext) -> Vec<String> {
+fn build_output(
+    verbose: bool,
+    profile: ModuleProfile,
+    cfg: &MotdConfig,
+    ctx: &RenderContext,
+) -> Vec<String> {
     let welcome = resolve_welcome_text(cfg);
-    let selection = resolve_modules(cfg);
+    let selection = resolve_modules(cfg, current_viewer_role(), profile);
     let output = resolve_output_settings(cfg);
     let snapshot = collect_snapshot(&selection.modules, cfg);
     let mut lines = Vec::new();

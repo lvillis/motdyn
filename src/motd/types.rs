@@ -96,8 +96,24 @@ impl ModuleKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModuleSource {
     Default,
+    RoleProfile,
+    ProfileFull,
+    ProfileBasic,
     Configured,
     FallbackDefault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleProfile {
+    Auto,
+    Full,
+    Basic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ViewerRole {
+    Root,
+    User,
 }
 
 #[derive(Debug, Clone)]

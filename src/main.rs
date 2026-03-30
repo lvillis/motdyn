@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::Path;
 
 mod config;
@@ -13,6 +13,9 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    #[arg(long, value_enum, default_value_t = ProfileArg::Auto, global = true)]
+    profile: ProfileArg,
+
     #[arg(long, global = true)]
     plain: bool,
 
@@ -24,6 +27,23 @@ struct Cli {
 
     #[command(subcommand)]
     cmd: Option<Commands>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ProfileArg {
+    Auto,
+    Full,
+    Basic,
+}
+
+impl From<ProfileArg> for motd::ModuleProfile {
+    fn from(value: ProfileArg) -> Self {
+        match value {
+            ProfileArg::Auto => Self::Auto,
+            ProfileArg::Full => Self::Full,
+            ProfileArg::Basic => Self::Basic,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -125,7 +145,7 @@ fn run_motd(cli: &Cli) {
         merged_cfg.output.section_headers = Some(true);
     }
 
-    motd::render(cli.verbose, &merged_cfg, &render_ctx);
+    motd::render(cli.verbose, cli.profile.into(), &merged_cfg, &render_ctx);
 }
 
 fn run_motd_safely(cli: &Cli) {
@@ -152,5 +172,14 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn clap_parses_profile_values() {
+        let cli = Cli::try_parse_from(["motdyn", "--profile", "basic"]).expect("cli should parse");
+        assert_eq!(cli.profile, ProfileArg::Basic);
+
+        let cli = Cli::try_parse_from(["motdyn", "--profile", "full"]).expect("cli should parse");
+        assert_eq!(cli.profile, ProfileArg::Full);
     }
 }

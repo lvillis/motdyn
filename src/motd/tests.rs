@@ -19,13 +19,13 @@ use super::probe::{
     run_command_with_timeout, to_gb_and_ratio,
 };
 use super::render::{
-    build_verbose_items, default_modules, render_module_lines, resolve_modules,
+    basic_modules, build_verbose_items, default_modules, render_module_lines, resolve_modules,
     resolve_output_settings,
 };
 use super::types::{
-    HiddenField, ModuleKind, ModuleSelection, ModuleSource, NetworkProbeError, OutputSettings,
-    ProbeIssue, RenderContext, RenderedItem, SnapshotDiagnostics, SystemSnapshot, UsageSummary,
-    WelcomeCacheEntry, WelcomeResolution, WelcomeSource, DEFAULT_WELCOME,
+    HiddenField, ModuleKind, ModuleProfile, ModuleSelection, ModuleSource, NetworkProbeError,
+    OutputSettings, ProbeIssue, RenderContext, RenderedItem, SnapshotDiagnostics, SystemSnapshot,
+    UsageSummary, ViewerRole, WelcomeCacheEntry, WelcomeResolution, WelcomeSource, DEFAULT_WELCOME,
 };
 #[cfg(target_os = "linux")]
 use super::types::{LinuxUtmpExitStatus, LinuxUtmpRecord, LinuxUtmpTimeVal32};
@@ -90,10 +90,47 @@ fn resolve_output_settings_normalizes_hidden_fields_and_ignores_unknowns() {
 }
 
 #[test]
-fn resolve_modules_uses_defaults_when_unset() {
-    let selection = resolve_modules(&MotdConfig::default());
+fn resolve_modules_uses_full_defaults_for_root_when_unset() {
+    let selection = resolve_modules(
+        &MotdConfig::default(),
+        ViewerRole::Root,
+        ModuleProfile::Auto,
+    );
     assert_eq!(selection.source, ModuleSource::Default);
     assert_eq!(selection.modules, default_modules());
+}
+
+#[test]
+fn resolve_modules_uses_basic_profile_for_non_root_when_unset() {
+    let selection = resolve_modules(
+        &MotdConfig::default(),
+        ViewerRole::User,
+        ModuleProfile::Auto,
+    );
+    assert_eq!(selection.source, ModuleSource::RoleProfile);
+    assert_eq!(selection.modules, basic_modules());
+}
+
+#[test]
+fn resolve_modules_can_force_full_profile_for_non_root() {
+    let selection = resolve_modules(
+        &MotdConfig::default(),
+        ViewerRole::User,
+        ModuleProfile::Full,
+    );
+    assert_eq!(selection.source, ModuleSource::ProfileFull);
+    assert_eq!(selection.modules, default_modules());
+}
+
+#[test]
+fn resolve_modules_can_force_basic_profile_for_root() {
+    let selection = resolve_modules(
+        &MotdConfig::default(),
+        ViewerRole::Root,
+        ModuleProfile::Basic,
+    );
+    assert_eq!(selection.source, ModuleSource::ProfileBasic);
+    assert_eq!(selection.modules, basic_modules());
 }
 
 #[test]
@@ -109,7 +146,7 @@ fn resolve_modules_normalizes_aliases_and_skips_unknowns() {
         ..MotdConfig::default()
     };
 
-    let selection = resolve_modules(&cfg);
+    let selection = resolve_modules(&cfg, ViewerRole::User, ModuleProfile::Basic);
     assert_eq!(selection.source, ModuleSource::Configured);
     assert_eq!(
         selection.modules,

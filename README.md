@@ -130,6 +130,7 @@ Commands:
 Global options:
 
 - `-v`, `--verbose`
+- `--profile auto|full|basic`
 - `--plain`
 - `--compact`
 - `--section-headers`
@@ -206,8 +207,11 @@ Notes:
 - `welcome` is the single-source shortcut. `welcome_sources` is preferred when you want ordered fallback.
 - each welcome source may be a literal string, a local path, a `file://` URL, or an `http`/`https` URL.
 - sources are tried in order until one yields usable content.
-- if `modules` is omitted, the default built-in order is used: `host`, `network`, `user`, `time`, `uptime`, `load`, `os`, `kernel`, `virtualization`, `cpu`, `memory`, `swap`, `disk`.
+- `--profile auto` is the default: `root` keeps the full built-in view, while non-root users default to the basic profile: `host`, `network`, `user`, `time`, `uptime`, `load`.
+- `--profile full` forces the complete built-in module set even for non-root sessions.
+- `--profile basic` forces the compact baseline even for `root`.
 - if `modules` is an empty list, only the welcome and farewell text are shown.
+- explicit `modules` always override the role-based default.
 - `services` is opt-in and reads the ordered list from `[service_status].services`.
 - `updates` is opt-in and uses local package manager metadata when `apt` or `dnf` is available.
 - `last_login` and `failed_login` use `lastlog` and `lastb` when present.
