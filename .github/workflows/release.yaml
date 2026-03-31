@@ -138,7 +138,7 @@ jobs:
           tar czf "${staging}.tar.gz" "${staging}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.target }}
           path: ${{ env.PROJECT }}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
