@@ -3,40 +3,22 @@ use std::fmt;
 use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
-#[repr(C)]
-pub(super) struct LinuxUtmpExitStatus {
-    pub(super) e_termination: i16,
-    pub(super) e_exit: i16,
-}
-
+pub(super) const LINUX_UTMP_RECORD_SIZE: usize = 384;
 #[cfg(target_os = "linux")]
-#[repr(C)]
-pub(super) struct LinuxUtmpTimeVal32 {
-    pub(super) tv_sec: i32,
-    pub(super) tv_usec: i32,
-}
-
+pub(super) const LINUX_UTMP_TYPE_OFFSET: usize = 0;
 #[cfg(target_os = "linux")]
-#[repr(C)]
-pub(super) struct LinuxUtmpRecord {
-    pub(super) ut_type: i16,
-    pub(super) ut_pid: i32,
-    pub(super) ut_line: [u8; 32],
-    pub(super) ut_id: [u8; 4],
-    pub(super) ut_user: [u8; 32],
-    pub(super) ut_host: [u8; 256],
-    pub(super) ut_exit: LinuxUtmpExitStatus,
-    pub(super) ut_session: i32,
-    pub(super) ut_tv: LinuxUtmpTimeVal32,
-    pub(super) ut_addr_v6: [i32; 4],
-    pub(super) __unused: [u8; 20],
-}
+pub(super) const LINUX_UTMP_USER_OFFSET: usize = 44;
+#[cfg(target_os = "linux")]
+pub(super) const LINUX_UTMP_USER_LEN: usize = 32;
+#[cfg(target_os = "linux")]
+pub(super) const LINUX_USER_PROCESS: i16 = 7;
 
 pub(super) const DEFAULT_WELCOME: &str = "Welcome!";
 pub(super) const DEFAULT_FAREWELL: &str = "Have a nice day!";
 pub(super) const DEFAULT_WELCOME_TIMEOUT_MS: u64 = 250;
 pub(super) const DEFAULT_WELCOME_CACHE_TTL_SECS: u64 = 300;
 pub(super) const DEFAULT_WELCOME_CACHE_PATH: &str = "~/.cache/motdyn/welcome.txt";
+#[cfg(feature = "remote-welcome")]
 pub(super) const MAX_WELCOME_BODY_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone)]
@@ -148,9 +130,10 @@ pub(super) struct SystemSnapshot {
     pub(super) cpu_count: usize,
     pub(super) memory: UsageSummary,
     pub(super) swap: UsageSummary,
+    pub(super) root_disk: Option<UsageSummary>,
     pub(super) disk_items: Vec<RenderedItem>,
-    pub(super) last_login: String,
-    pub(super) failed_login: String,
+    pub(super) last_login: LastLoginInfo,
+    pub(super) failed_login: FailedLoginInfo,
     pub(super) service_items: Vec<RenderedItem>,
     pub(super) update_summary: String,
     pub(super) diagnostics: SnapshotDiagnostics,
@@ -161,6 +144,102 @@ pub(super) struct UsageSummary {
     pub(super) used_gb: f64,
     pub(super) total_gb: f64,
     pub(super) ratio: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LoginSessionKind {
+    Ssh,
+    Console,
+    Unknown,
+}
+
+impl LoginSessionKind {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::Console => "console",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceRelation {
+    Same,
+    Different,
+    Unknown,
+}
+
+impl SourceRelation {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Same => "same source as current session",
+            Self::Different => "different from current session",
+            Self::Unknown => "source relation unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LastLoginInfo {
+    Unavailable,
+    NeverRecorded,
+    Recorded(LastLoginRecord),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LastLoginRecord {
+    pub(super) when: String,
+    pub(super) from: Option<String>,
+    pub(super) via: Option<String>,
+    pub(super) kind: LoginSessionKind,
+    pub(super) age: Option<String>,
+    pub(super) source_relation: SourceRelation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum FailedLoginInfo {
+    Unavailable,
+    None,
+    Summary(FailedLoginSummary),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FailedLoginSeverity {
+    Low,
+    Warn,
+    High,
+}
+
+impl FailedLoginSeverity {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Warn => "warn",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FailedLoginBucket {
+    pub(super) value: String,
+    pub(super) count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FailedLoginSummary {
+    pub(super) total: usize,
+    pub(super) count_24h: usize,
+    pub(super) count_7d: usize,
+    pub(super) last_when: Option<String>,
+    pub(super) last_from: Option<String>,
+    pub(super) last_via: Option<String>,
+    pub(super) top_sources: Vec<FailedLoginBucket>,
+    pub(super) top_vias: Vec<FailedLoginBucket>,
+    pub(super) unique_sources: usize,
+    pub(super) severity: FailedLoginSeverity,
+    pub(super) current_source_seen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -178,9 +257,13 @@ pub(super) enum WelcomeSource {
     Default,
     Literal,
     LocalFile,
+    #[cfg(feature = "remote-welcome")]
     RemoteFresh,
+    #[cfg(feature = "remote-welcome")]
     CacheFresh,
+    #[cfg(feature = "remote-welcome")]
     CacheRevalidated,
+    #[cfg(feature = "remote-welcome")]
     CacheStale,
 }
 
@@ -194,6 +277,7 @@ pub(super) struct WelcomeResolution {
     pub(super) warnings: Vec<WelcomeIssue>,
 }
 
+#[cfg(feature = "remote-welcome")]
 #[derive(Debug, Clone)]
 pub(super) struct WelcomeCacheEntry {
     pub(super) url: String,
@@ -205,27 +289,58 @@ pub(super) struct WelcomeCacheEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WelcomeIssue {
+    #[cfg(feature = "remote-welcome")]
     SourceFailed(String),
+    #[cfg(feature = "remote-welcome")]
     FileUrlUnsupportedHost(String),
-    LocalFileRead { path: PathBuf, message: String },
-    LocalFileEmpty { path: PathBuf },
+    LocalFileRead {
+        path: PathBuf,
+        message: String,
+    },
+    LocalFileEmpty {
+        path: PathBuf,
+    },
+    #[cfg(feature = "remote-welcome")]
     UnsupportedUrlScheme(String),
+    #[cfg(not(feature = "remote-welcome"))]
+    UrlSupportDisabled(String),
+    #[cfg(feature = "remote-welcome")]
     HttpDisabled,
+    #[cfg(feature = "remote-welcome")]
     EmbeddedCredentials,
+    #[cfg(feature = "remote-welcome")]
     RemoteDisabled,
-    CacheRead { path: PathBuf, message: String },
-    CacheMalformed { path: PathBuf, reason: &'static str },
-    CacheWrite { path: PathBuf, message: String },
+    #[cfg(feature = "remote-welcome")]
+    CacheRead {
+        path: PathBuf,
+        message: String,
+    },
+    #[cfg(feature = "remote-welcome")]
+    CacheMalformed {
+        path: PathBuf,
+        reason: &'static str,
+    },
+    #[cfg(feature = "remote-welcome")]
+    CacheWrite {
+        path: PathBuf,
+        message: String,
+    },
+    #[cfg(feature = "remote-welcome")]
     BuildClient(String),
+    #[cfg(feature = "remote-welcome")]
     Fetch(String),
+    #[cfg(feature = "remote-welcome")]
     HttpStatus(String),
+    #[cfg(feature = "remote-welcome")]
     Decode(String),
+    #[cfg(feature = "remote-welcome")]
     EmptyResponse,
 }
 
 impl fmt::Display for WelcomeIssue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "remote-welcome")]
             Self::SourceFailed(source) => {
                 write!(
                     f,
@@ -233,6 +348,7 @@ impl fmt::Display for WelcomeIssue {
                     source
                 )
             }
+            #[cfg(feature = "remote-welcome")]
             Self::FileUrlUnsupportedHost(host) => {
                 write!(f, "file URL host '{}' is not supported", host)
             }
@@ -247,50 +363,68 @@ impl fmt::Display for WelcomeIssue {
             Self::LocalFileEmpty { path } => {
                 write!(f, "local welcome file '{}' was empty", path.display())
             }
+            #[cfg(feature = "remote-welcome")]
             Self::UnsupportedUrlScheme(scheme) => write!(
                 f,
                 "unsupported URL scheme '{}'; using cached or default welcome",
                 scheme
             ),
+            #[cfg(not(feature = "remote-welcome"))]
+            Self::UrlSupportDisabled(scheme) => write!(
+                f,
+                "welcome URL scheme '{}' requires the remote-welcome feature; using default welcome",
+                scheme
+            ),
+            #[cfg(feature = "remote-welcome")]
             Self::HttpDisabled => {
                 write!(
                     f,
                     "HTTP welcome URLs are disabled; using cached or default welcome"
                 )
             }
+            #[cfg(feature = "remote-welcome")]
             Self::EmbeddedCredentials => write!(
                 f,
                 "URLs with embedded credentials are not supported; using cached or default welcome"
             ),
+            #[cfg(feature = "remote-welcome")]
             Self::RemoteDisabled => {
                 write!(
                     f,
                     "remote welcome fetch disabled; using cached or default welcome"
                 )
             }
+            #[cfg(feature = "remote-welcome")]
             Self::CacheRead { path, message } => {
                 write!(f, "failed to read cache '{}': {}", path.display(), message)
             }
+            #[cfg(feature = "remote-welcome")]
             Self::CacheMalformed { path, reason } => {
                 write!(f, "cache '{}' is {}", path.display(), reason)
             }
+            #[cfg(feature = "remote-welcome")]
             Self::CacheWrite { path, message } => {
                 write!(f, "failed to write cache '{}': {}", path.display(), message)
             }
+            #[cfg(feature = "remote-welcome")]
             Self::BuildClient(message) => {
                 write!(f, "failed to build reqx client: {}", message)
             }
+            #[cfg(feature = "remote-welcome")]
             Self::Fetch(message) => {
                 write!(f, "failed to fetch remote welcome: {}", message)
             }
+            #[cfg(feature = "remote-welcome")]
             Self::HttpStatus(status) => write!(
                 f,
                 "remote welcome returned HTTP {}; using cached or default welcome",
                 status
             ),
+            #[cfg(feature = "remote-welcome")]
             Self::Decode(message) => {
                 write!(f, "failed to decode remote welcome: {}", message)
             }
+            #[cfg(feature = "remote-welcome")]
             Self::EmptyResponse => write!(f, "remote welcome response was empty"),
         }
     }
@@ -490,8 +624,10 @@ impl SectionKind {
 pub(super) enum PaintKind {
     Label,
     Header,
+    Dim,
     Cyan,
     Yellow,
+    Red,
     Green,
     Magenta,
 }

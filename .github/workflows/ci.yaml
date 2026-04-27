@@ -34,12 +34,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
           components: rustfmt
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-${{ runner.os }}-1.94.0
+          shared-key: ci-${{ runner.os }}-1.95.0
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -51,14 +51,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
           components: clippy
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-${{ runner.os }}-1.94.0
+          shared-key: ci-${{ runner.os }}-1.95.0
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: |
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features --features slim -- -D warnings
 
   test:
     name: test
@@ -68,14 +70,18 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-${{ runner.os }}-1.94.0
+          shared-key: ci-${{ runner.os }}-1.95.0
       - name: Run tests
-        run: cargo test --locked
+        run: |
+          cargo test --locked --all-features
+          cargo test --locked --no-default-features --features slim
       - name: Smoke test CLI help
         run: |
           cargo run --locked -- --help >/dev/null
           cargo run --locked -- status --help >/dev/null
+          cargo run --locked --no-default-features --features slim -- --help >/dev/null
+          cargo run --locked --no-default-features --features slim -- --text 'service=${SERVICE:-unknown}' >/dev/null

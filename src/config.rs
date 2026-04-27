@@ -1,10 +1,11 @@
 use std::env;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::de::{self, Deserializer};
 use serde::Deserialize;
+use serde::de::{self, Deserializer};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -512,10 +513,14 @@ fn normalize_ordered_string_list(values: Option<Vec<String>>) -> Option<Vec<Stri
 }
 
 pub fn expand_tilde(path_str: &str) -> PathBuf {
+    expand_tilde_with_home(path_str, env::var_os("HOME").as_deref())
+}
+
+fn expand_tilde_with_home(path_str: &str, home: Option<&OsStr>) -> PathBuf {
     if !path_str.starts_with('~') {
         return PathBuf::from(path_str);
     }
-    if let Some(home) = env::var_os("HOME") {
+    if let Some(home) = home {
         return PathBuf::from(path_str.replacen('~', &home.to_string_lossy(), 1));
     }
     PathBuf::from(path_str)
@@ -524,7 +529,6 @@ pub fn expand_tilde(path_str: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use std::path::Path;
 
     use tempfile::tempdir;
@@ -749,16 +753,10 @@ mod tests {
     #[test]
     fn expand_tilde_uses_home_env() {
         let temp_home = tempdir().unwrap();
-        let original = env::var_os("HOME");
-        env::set_var("HOME", temp_home.path());
 
-        let expanded = expand_tilde("~/motdyn/config.toml");
+        let expanded =
+            expand_tilde_with_home("~/motdyn/config.toml", Some(temp_home.path().as_os_str()));
         assert!(expanded.starts_with(temp_home.path()));
         assert!(expanded.ends_with(Path::new("motdyn").join("config.toml")));
-
-        match original {
-            Some(val) => env::set_var("HOME", val),
-            None => env::remove_var("HOME"),
-        }
     }
 }

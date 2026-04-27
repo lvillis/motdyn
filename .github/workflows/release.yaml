@@ -45,26 +45,30 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
           components: rustfmt, clippy
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-verify-${{ runner.os }}-1.94.0
+          shared-key: release-verify-${{ runner.os }}-1.95.0
 
       - name: Check formatting
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: |
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features --features slim -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked
+        run: |
+          cargo test --locked --all-features
+          cargo test --locked --no-default-features --features slim
 
   build:
     needs: verify
-    name: build-${{ matrix.target }}
+    name: build-${{ matrix.target }}-${{ matrix.variant }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -74,10 +78,22 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             builder: cargo
+            variant: full
           - target: x86_64-unknown-linux-musl
             builder: cargo-musl
+            variant: full
           - target: aarch64-unknown-linux-musl
             builder: cross
+            variant: full
+          - target: x86_64-unknown-linux-gnu
+            builder: cargo
+            variant: slim
+          - target: x86_64-unknown-linux-musl
+            builder: cargo-musl
+            variant: slim
+          - target: aarch64-unknown-linux-musl
+            builder: cross
+            variant: slim
 
     steps:
       - uses: actions/checkout@v5
@@ -87,13 +103,13 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
           targets: ${{ matrix.target }}
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-${{ matrix.target }}-1.94.0
+          shared-key: release-${{ matrix.target }}-1.95.0
 
       - name: Install musl tooling
         if: ${{ matrix.builder == 'cargo-musl' }}
@@ -110,15 +126,20 @@ jobs:
         run: |
           set -euo pipefail
 
+          feature_flags=()
+          if [[ "${{ matrix.variant }}" == "slim" ]]; then
+            feature_flags+=(--no-default-features --features slim)
+          fi
+
           case "${{ matrix.builder }}" in
             cargo)
-              cargo build --release --locked --target "${{ matrix.target }}"
+              cargo build --release --locked --target "${{ matrix.target }}" "${feature_flags[@]}"
               ;;
             cargo-musl)
-              CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked --target "${{ matrix.target }}"
+              CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked --target "${{ matrix.target }}" "${feature_flags[@]}"
               ;;
             cross)
-              cross build --release --locked --target "${{ matrix.target }}"
+              cross build --release --locked --target "${{ matrix.target }}" "${feature_flags[@]}"
               ;;
             *)
               echo "Unsupported builder: ${{ matrix.builder }}" >&2
@@ -127,21 +148,27 @@ jobs:
           esac
 
       - name: Package artifact
+        id: package
         shell: bash
         run: |
           set -euo pipefail
 
-          staging="${PROJECT}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          project="${PROJECT}"
+          if [[ "${{ matrix.variant }}" == "slim" ]]; then
+            project="${PROJECT}-slim"
+          fi
+          staging="${project}-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "${staging}"
           cp README.md LICENSE "${staging}/"
           cp "target/${{ matrix.target }}/release/${PROJECT}" "${staging}/"
           tar czf "${staging}.tar.gz" "${staging}"
+          echo "artifact=${staging}.tar.gz" >> "${GITHUB_OUTPUT}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
-          path: ${{ env.PROJECT }}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          name: ${{ matrix.target }}-${{ matrix.variant }}
+          path: ${{ steps.package.outputs.artifact }}
           compression-level: 0
           if-no-files-found: error
 

@@ -1,38 +1,50 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+#[cfg(feature = "remote-welcome")]
+use std::io::Read;
+use std::io::Write;
+#[cfg(feature = "remote-welcome")]
 use std::net::TcpListener;
+#[cfg(feature = "remote-welcome")]
 use std::thread;
 
-#[cfg(target_os = "linux")]
-use libc::USER_PROCESS;
+use chrono::{Local, TimeZone};
 use tempfile::tempdir;
 
-use crate::config::{MotdConfig, OutputConfig, RemoteWelcomeConfig};
+#[cfg(feature = "remote-welcome")]
+use crate::config::RemoteWelcomeConfig;
+use crate::config::{MotdConfig, OutputConfig};
 
 use super::probe::{
-    count_logged_in_users_from_linux_utmp_file, detect_virtualization_from_cgroup, format_uptime,
-    parse_apt_upgradable_output, parse_cpuinfo_content, parse_default_interface_output,
-    parse_dnf_check_update_output, parse_interface_ipv4_output, parse_lastb_output,
-    parse_lastlog_output, parse_loadavg_content, parse_meminfo_content, parse_os_release_content,
-    parse_redhat_release_content, parse_ssh_connection_ip, parse_uptime_content,
-    run_command_with_timeout, to_gb_and_ratio,
+    FailedLoginEvent, ParsedLastLoginRecord, count_logged_in_users_from_linux_utmp_file,
+    detect_virtualization_from_cgroup, format_uptime, parse_apt_upgradable_output,
+    parse_cpuinfo_content, parse_default_interface_output, parse_dnf_check_update_output,
+    parse_interface_ipv4_output, parse_lastb_output, parse_lastlog_output, parse_loadavg_content,
+    parse_meminfo_content, parse_os_release_content, parse_redhat_release_content,
+    parse_ssh_connection_ip, parse_uptime_content, run_command_with_timeout,
+    summarize_failed_login_events, to_gb_and_ratio,
 };
 use super::render::{
     basic_modules, build_verbose_items, default_modules, render_module_lines, resolve_modules,
     resolve_output_settings,
 };
+#[cfg(feature = "remote-welcome")]
+use super::types::WelcomeCacheEntry;
 use super::types::{
-    HiddenField, ModuleKind, ModuleProfile, ModuleSelection, ModuleSource, NetworkProbeError,
-    OutputSettings, ProbeIssue, RenderContext, RenderedItem, SnapshotDiagnostics, SystemSnapshot,
-    UsageSummary, ViewerRole, WelcomeCacheEntry, WelcomeResolution, WelcomeSource, DEFAULT_WELCOME,
+    DEFAULT_WELCOME, FailedLoginBucket, FailedLoginInfo, FailedLoginSeverity, HiddenField,
+    LastLoginInfo, LastLoginRecord, LoginSessionKind, ModuleKind, ModuleProfile, ModuleSelection,
+    ModuleSource, NetworkProbeError, OutputSettings, ProbeIssue, RenderContext, RenderedItem,
+    SnapshotDiagnostics, SourceRelation, SystemSnapshot, UsageSummary, ViewerRole,
+    WelcomeResolution, WelcomeSource,
 };
 #[cfg(target_os = "linux")]
-use super::types::{LinuxUtmpExitStatus, LinuxUtmpRecord, LinuxUtmpTimeVal32};
-use super::welcome::{
-    current_unix_secs, read_welcome_cache, resolve_remote_welcome_settings, resolve_welcome_text,
-    write_welcome_cache,
+use super::types::{
+    LINUX_USER_PROCESS, LINUX_UTMP_RECORD_SIZE, LINUX_UTMP_TYPE_OFFSET, LINUX_UTMP_USER_LEN,
+    LINUX_UTMP_USER_OFFSET,
 };
+#[cfg(feature = "remote-welcome")]
+use super::welcome::{current_unix_secs, read_welcome_cache, write_welcome_cache};
+use super::welcome::{resolve_remote_welcome_settings, resolve_welcome_text};
 
 #[test]
 fn format_uptime_formats_days() {
@@ -228,6 +240,24 @@ fn fetch_welcome_text_defaults_for_unsupported_url_scheme() {
     assert_eq!(resolution.text, DEFAULT_WELCOME);
 }
 
+#[cfg(not(feature = "remote-welcome"))]
+#[test]
+fn fetch_welcome_text_defaults_for_remote_url_without_feature() {
+    let cfg = MotdConfig {
+        welcome: Some("https://example.com/motd.txt".into()),
+        ..MotdConfig::default()
+    };
+
+    let resolution = resolve_welcome_text(&cfg);
+
+    assert_eq!(resolution.source, WelcomeSource::Default);
+    assert_eq!(resolution.text, DEFAULT_WELCOME);
+    assert!(resolution.warnings.iter().any(|warning| matches!(
+        warning,
+        super::types::WelcomeIssue::UrlSupportDisabled(scheme) if scheme == "https"
+    )));
+}
+
 #[test]
 fn parse_os_release_content_requires_name_and_version() {
     assert_eq!(
@@ -255,9 +285,11 @@ admin            pts/0    10.10.1.15                                 Thu Mar 30 
 
     assert_eq!(
         parse_lastlog_output(output),
-        Some(Some(
-            "Thu Mar 30 09:30:00 +0000 2026, from 10.10.1.15, via pts/0".to_string()
-        ))
+        Some(Some(ParsedLastLoginRecord {
+            when: "Thu Mar 30 09:30:00 +0000 2026".to_string(),
+            from: Some("10.10.1.15".to_string()),
+            via: Some("pts/0".to_string()),
+        }))
     );
 }
 
@@ -272,17 +304,58 @@ admin                                                         **Never logged in*
 
 #[test]
 fn parse_lastb_output_summarizes_recent_failures() {
+    let now = Local.with_ymd_and_hms(2026, 3, 30, 12, 0, 0).unwrap();
     let output = "\
 admin    ssh:notty   10.10.1.20   Thu Mar 30 09:25 - 09:25  (00:00)\n\
 admin    ssh:notty   10.10.1.21   Thu Mar 30 09:20 - 09:20  (00:00)\n\
 btmp begins Thu Mar 30 00:00:00 2026\n";
 
+    let events = parse_lastb_output(output, now).unwrap();
     assert_eq!(
-        parse_lastb_output(output),
-        Some(Some(
-            "2 recent failures, last from 10.10.1.20, via ssh:notty, at Thu Mar 30 09:25 - 09:25 (00:00)"
-                .to_string()
-        ))
+        events,
+        vec![
+            FailedLoginEvent {
+                when: Some(Local.with_ymd_and_hms(2026, 3, 30, 9, 25, 0).unwrap()),
+                when_raw: "Thu Mar 30 09:25".to_string(),
+                from: Some("10.10.1.20".to_string()),
+                via: Some("ssh:notty".to_string()),
+            },
+            FailedLoginEvent {
+                when: Some(Local.with_ymd_and_hms(2026, 3, 30, 9, 20, 0).unwrap()),
+                when_raw: "Thu Mar 30 09:20".to_string(),
+                from: Some("10.10.1.21".to_string()),
+                via: Some("ssh:notty".to_string()),
+            }
+        ]
+    );
+
+    assert_eq!(
+        summarize_failed_login_events(&events, "10.10.1.20", now),
+        FailedLoginInfo::Summary(super::types::FailedLoginSummary {
+            total: 2,
+            count_24h: 2,
+            count_7d: 2,
+            last_when: Some("Thu Mar 30 09:25".to_string()),
+            last_from: Some("10.10.1.20".to_string()),
+            last_via: Some("ssh:notty".to_string()),
+            top_sources: vec![
+                FailedLoginBucket {
+                    value: "10.10.1.20".to_string(),
+                    count: 1,
+                },
+                FailedLoginBucket {
+                    value: "10.10.1.21".to_string(),
+                    count: 1,
+                },
+            ],
+            top_vias: vec![FailedLoginBucket {
+                value: "ssh:notty".to_string(),
+                count: 2,
+            }],
+            unique_sources: 2,
+            severity: FailedLoginSeverity::High,
+            current_source_seen: true,
+        })
     );
 }
 
@@ -476,6 +549,126 @@ fn render_module_lines_compact_layout_packs_multiple_items_per_line() {
 }
 
 #[test]
+fn render_module_lines_compact_summarizes_login_security_modules() {
+    let settings = OutputSettings {
+        compact: true,
+        plain: true,
+        section_headers: false,
+        hidden_fields: HashSet::new(),
+        ignored_hidden_fields: Vec::new(),
+    };
+
+    let lines = render_module_lines(
+        &[ModuleKind::LastLogin, ModuleKind::FailedLogin],
+        &sample_snapshot(),
+        &settings,
+    );
+    let rendered = lines.join("\n");
+
+    assert!(rendered.contains("Operations:"));
+    assert!(rendered.contains("last 2h ago from 10.10.1.15 via pts/0"));
+    assert!(rendered.contains("failed warn, 3/24h, top 10.10.1.20 (2)"));
+}
+
+#[test]
+fn render_module_lines_full_keeps_failed_login_summary_concise() {
+    let settings = OutputSettings {
+        compact: false,
+        plain: true,
+        section_headers: false,
+        hidden_fields: HashSet::new(),
+        ignored_hidden_fields: Vec::new(),
+    };
+
+    let lines = render_module_lines(&[ModuleKind::FailedLogin], &sample_snapshot(), &settings);
+    let rendered = lines.join("\n");
+
+    assert!(rendered.contains("Failed login: warn, 3/24h, 5/7d, top 10.10.1.20 (2)"));
+    assert!(!rendered.contains("ssh:notty"));
+    assert!(!rendered.contains("Thu Mar 30 09:25"));
+}
+
+#[test]
+fn render_module_lines_full_combines_memory_and_root_disk_usage() {
+    let settings = OutputSettings {
+        compact: false,
+        plain: true,
+        section_headers: false,
+        hidden_fields: HashSet::new(),
+        ignored_hidden_fields: Vec::new(),
+    };
+
+    let lines = render_module_lines(
+        &[ModuleKind::Memory, ModuleKind::Disk],
+        &sample_snapshot(),
+        &settings,
+    );
+    let rendered = lines.join("\n");
+
+    assert!(rendered.contains("Resource use:"));
+    assert!(rendered.contains("mem  25% ###-------  disk  16% ##--------"));
+    assert!(!rendered.contains("Memory used/total:"));
+    assert!(!rendered.contains("Disk usage (root):"));
+    assert!(rendered.contains("Disk usage (nfs):"));
+}
+
+#[test]
+fn render_module_lines_full_shortens_last_login_and_hides_empty_swap() {
+    let settings = OutputSettings {
+        compact: false,
+        plain: true,
+        section_headers: false,
+        hidden_fields: HashSet::new(),
+        ignored_hidden_fields: Vec::new(),
+    };
+
+    let mut snapshot = sample_snapshot();
+    snapshot.swap = UsageSummary {
+        used_gb: 0.0,
+        total_gb: 0.0,
+        ratio: 0.0,
+    };
+
+    let lines = render_module_lines(
+        &[ModuleKind::LastLogin, ModuleKind::Swap],
+        &snapshot,
+        &settings,
+    );
+    let rendered = lines.join("\n");
+
+    assert!(rendered.contains("Last login:"));
+    assert!(rendered.contains("2h ago from 10.10.1.15 via pts/0"));
+    assert!(!rendered.contains("Thu Mar 30 09:30:00"));
+    assert!(!rendered.contains("Swap used/total:"));
+}
+
+#[test]
+fn render_module_lines_marks_critical_root_disk_usage() {
+    let settings = OutputSettings {
+        compact: false,
+        plain: true,
+        section_headers: false,
+        hidden_fields: HashSet::new(),
+        ignored_hidden_fields: Vec::new(),
+    };
+    let mut snapshot = sample_snapshot();
+    snapshot.root_disk = Some(UsageSummary {
+        used_gb: 294.0,
+        total_gb: 301.0,
+        ratio: 97.5,
+    });
+
+    let lines = render_module_lines(
+        &[ModuleKind::Memory, ModuleKind::Disk],
+        &snapshot,
+        &settings,
+    );
+    let rendered = lines.join("\n");
+
+    assert!(rendered.contains("disk  98% critical ##########"));
+}
+
+#[test]
 fn build_verbose_items_reports_degraded_modules_and_ignored_fields() {
     let mut snapshot = sample_snapshot();
     snapshot.diagnostics.degrade(
@@ -519,17 +712,83 @@ fn build_verbose_items_reports_degraded_modules_and_ignored_fields() {
         &output,
     );
 
-    assert!(items
-        .iter()
-        .any(|item| item.label == "Degraded modules:" && item.value.contains("network")));
-    assert!(items
-        .iter()
-        .any(|item| item.label == "Ignored fields:" && item.value.contains("bogus")));
-    assert!(items
-        .iter()
-        .any(|item| item.label == "Probe notes:" && item.value.contains("SSH_CONNECTION")));
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "Degraded modules:" && item.value.contains("network"))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "Ignored fields:" && item.value.contains("bogus"))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "Probe notes:" && item.value.contains("SSH_CONNECTION"))
+    );
 }
 
+#[test]
+fn build_verbose_items_includes_login_security_details() {
+    let output = OutputSettings {
+        compact: false,
+        plain: true,
+        section_headers: false,
+        hidden_fields: HashSet::new(),
+        ignored_hidden_fields: Vec::new(),
+    };
+    let snapshot = sample_snapshot();
+    let items = build_verbose_items(
+        &MotdConfig {
+            modules: Some(vec!["last_login".into(), "failed_login".into()]),
+            ..MotdConfig::default()
+        },
+        &RenderContext {
+            system_config_path: "/etc/motdyn/config.toml".into(),
+            system_config_status: "missing".into(),
+            user_config_path: "/root/.config/motdyn/config.toml".into(),
+            user_config_status: "missing".into(),
+            config_notes: Vec::new(),
+        },
+        &ModuleSelection {
+            modules: vec![ModuleKind::LastLogin, ModuleKind::FailedLogin],
+            ignored: Vec::new(),
+            source: ModuleSource::Configured,
+        },
+        &WelcomeResolution {
+            text: DEFAULT_WELCOME.to_string(),
+            source: WelcomeSource::Default,
+            source_detail: "default welcome".to_string(),
+            url: None,
+            settings: resolve_remote_welcome_settings(&MotdConfig::default()),
+            warnings: Vec::new(),
+        },
+        &snapshot,
+        &output,
+    );
+
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "Last login age:" && item.value == "2h ago")
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "Failed login severity:" && item.value == "warn")
+    );
+    assert!(items.iter().any(|item| item.label == "Last login record:"
+        && item.value.contains("Thu Mar 30 09:30:00 +0000 2026")));
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "Failed login top sources:"
+                && item.value.contains("10.10.1.20 (2)"))
+    );
+}
+
+#[cfg(feature = "remote-welcome")]
 #[test]
 fn write_and_read_welcome_cache_round_trip() {
     let dir = tempdir().unwrap();
@@ -552,6 +811,7 @@ fn write_and_read_welcome_cache_round_trip() {
     assert_eq!(restored.body, entry.body);
 }
 
+#[cfg(feature = "remote-welcome")]
 #[test]
 fn resolve_welcome_uses_fresh_cache_before_fetch() {
     let dir = tempdir().unwrap();
@@ -582,6 +842,7 @@ fn resolve_welcome_uses_fresh_cache_before_fetch() {
     assert_eq!(resolution.text, "cached welcome");
 }
 
+#[cfg(feature = "remote-welcome")]
 #[test]
 fn resolve_welcome_uses_stale_cache_when_remote_disabled() {
     let dir = tempdir().unwrap();
@@ -612,12 +873,15 @@ fn resolve_welcome_uses_stale_cache_when_remote_disabled() {
     let resolution = resolve_welcome_text(&cfg);
     assert_eq!(resolution.source, WelcomeSource::CacheStale);
     assert_eq!(resolution.text, "stale welcome");
-    assert!(resolution
-        .warnings
-        .iter()
-        .any(|warning| warning.to_string().contains("disabled")));
+    assert!(
+        resolution
+            .warnings
+            .iter()
+            .any(|warning| warning.to_string().contains("disabled"))
+    );
 }
 
+#[cfg(feature = "remote-welcome")]
 #[test]
 fn resolve_welcome_reports_malformed_cache() {
     let dir = tempdir().unwrap();
@@ -636,12 +900,15 @@ fn resolve_welcome_reports_malformed_cache() {
 
     let resolution = resolve_welcome_text(&cfg);
     assert_eq!(resolution.source, WelcomeSource::Default);
-    assert!(resolution
-        .warnings
-        .iter()
-        .any(|warning| warning.to_string().contains("malformed")));
+    assert!(
+        resolution
+            .warnings
+            .iter()
+            .any(|warning| warning.to_string().contains("malformed"))
+    );
 }
 
+#[cfg(feature = "remote-welcome")]
 #[test]
 fn resolve_welcome_cache_matches_normalized_url() {
     let dir = tempdir().unwrap();
@@ -672,6 +939,7 @@ fn resolve_welcome_cache_matches_normalized_url() {
     assert_eq!(resolution.text, "cached normalized welcome");
 }
 
+#[cfg(feature = "remote-welcome")]
 #[test]
 fn remote_welcome_rejects_non_success_status_without_cache() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -714,12 +982,15 @@ fn remote_welcome_rejects_non_success_status_without_cache() {
 
     assert_eq!(resolution.source, WelcomeSource::Default);
     assert_eq!(resolution.text, DEFAULT_WELCOME);
-    assert!(resolution
-        .warnings
-        .iter()
-        .any(|warning| warning.to_string().contains("HTTP 404")));
+    assert!(
+        resolution
+            .warnings
+            .iter()
+            .any(|warning| warning.to_string().contains("HTTP 404"))
+    );
 }
 
+#[cfg(feature = "remote-welcome")]
 #[test]
 fn remote_welcome_revalidates_stale_cache_on_http_304() {
     let dir = tempdir().unwrap();
@@ -792,10 +1063,10 @@ fn count_logged_in_users_from_linux_utmp_file_counts_user_process_records() {
     let path = dir.path().join("utmp");
     let mut file = File::create(&path).unwrap();
 
-    write_linux_utmp_record(&mut file, USER_PROCESS, "alice");
-    write_linux_utmp_record(&mut file, USER_PROCESS, "");
+    write_linux_utmp_record(&mut file, LINUX_USER_PROCESS, "alice");
+    write_linux_utmp_record(&mut file, LINUX_USER_PROCESS, "");
     write_linux_utmp_record(&mut file, 8, "");
-    write_linux_utmp_record(&mut file, USER_PROCESS, "root");
+    write_linux_utmp_record(&mut file, LINUX_USER_PROCESS, "root");
 
     assert_eq!(count_logged_in_users_from_linux_utmp_file(&path), Some(2));
 }
@@ -810,37 +1081,15 @@ fn to_gb_and_ratio_handles_zero_total() {
 
 #[cfg(target_os = "linux")]
 fn write_linux_utmp_record(file: &mut File, ut_type: i16, user: &str) {
-    let mut record = LinuxUtmpRecord {
-        ut_type,
-        ut_pid: 0,
-        ut_line: [0; 32],
-        ut_id: [0; 4],
-        ut_user: [0; 32],
-        ut_host: [0; 256],
-        ut_exit: LinuxUtmpExitStatus {
-            e_termination: 0,
-            e_exit: 0,
-        },
-        ut_session: 0,
-        ut_tv: LinuxUtmpTimeVal32 {
-            tv_sec: 0,
-            tv_usec: 0,
-        },
-        ut_addr_v6: [0; 4],
-        __unused: [0; 20],
-    };
+    let mut record = [0_u8; LINUX_UTMP_RECORD_SIZE];
+    record[LINUX_UTMP_TYPE_OFFSET..LINUX_UTMP_TYPE_OFFSET + 2]
+        .copy_from_slice(&ut_type.to_ne_bytes());
 
-    for (slot, byte) in record.ut_user.iter_mut().zip(user.bytes()) {
-        *slot = byte;
-    }
+    let user_len = user.len().min(LINUX_UTMP_USER_LEN);
+    record[LINUX_UTMP_USER_OFFSET..LINUX_UTMP_USER_OFFSET + user_len]
+        .copy_from_slice(&user.as_bytes()[..user_len]);
 
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            (&record as *const LinuxUtmpRecord).cast::<u8>(),
-            std::mem::size_of::<LinuxUtmpRecord>(),
-        )
-    };
-    file.write_all(bytes).unwrap();
+    file.write_all(&record).unwrap();
 }
 
 fn sample_snapshot() -> SystemSnapshot {
@@ -870,6 +1119,11 @@ fn sample_snapshot() -> SystemSnapshot {
             total_gb: 64.0,
             ratio: 0.0,
         },
+        root_disk: Some(UsageSummary {
+            used_gb: 1.20 * 1024.0,
+            total_gb: 7.68 * 1024.0,
+            ratio: 15.62,
+        }),
         disk_items: vec![
             RenderedItem {
                 label: "Disk usage (root):".to_string(),
@@ -880,8 +1134,39 @@ fn sample_snapshot() -> SystemSnapshot {
                 value: "/NFS => 1.72 TB/1.97 TB (87.47%)".to_string(),
             },
         ],
-        last_login: "Thu Mar 30 09:30:00 +0000 2026, from 10.10.1.15, via pts/0".to_string(),
-        failed_login: "none".to_string(),
+        last_login: LastLoginInfo::Recorded(LastLoginRecord {
+            when: "Thu Mar 30 09:30:00 +0000 2026".to_string(),
+            from: Some("10.10.1.15".to_string()),
+            via: Some("pts/0".to_string()),
+            kind: LoginSessionKind::Ssh,
+            age: Some("2h ago".to_string()),
+            source_relation: SourceRelation::Same,
+        }),
+        failed_login: FailedLoginInfo::Summary(super::types::FailedLoginSummary {
+            total: 5,
+            count_24h: 3,
+            count_7d: 5,
+            last_when: Some("Thu Mar 30 09:25".to_string()),
+            last_from: Some("10.10.1.20".to_string()),
+            last_via: Some("ssh:notty".to_string()),
+            top_sources: vec![
+                FailedLoginBucket {
+                    value: "10.10.1.20".to_string(),
+                    count: 2,
+                },
+                FailedLoginBucket {
+                    value: "10.10.1.21".to_string(),
+                    count: 2,
+                },
+            ],
+            top_vias: vec![FailedLoginBucket {
+                value: "ssh:notty".to_string(),
+                count: 5,
+            }],
+            unique_sources: 3,
+            severity: FailedLoginSeverity::Warn,
+            current_source_seen: false,
+        }),
         service_items: vec![
             RenderedItem {
                 label: "Service sshd:".to_string(),

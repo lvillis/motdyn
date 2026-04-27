@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$TARGETPLATFORM rust:1.94.0-alpine3.23 AS builder
+FROM --platform=$TARGETPLATFORM rust:1.95.0-alpine3.23 AS builder
 
 ARG TARGETARCH
+ARG CARGO_FEATURE_FLAGS=""
 
 RUN set -eux \
     && case "${TARGETARCH}" in \
@@ -24,7 +25,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/opt/app/target \
     set -eux \
     && rust_target="$(cat /tmp/rust-target)" \
-    && cargo build --release --locked --target="${rust_target}"
+    && cargo build --release --locked --target="${rust_target}" ${CARGO_FEATURE_FLAGS}
 
 RUN rm -f /opt/app/src/main.rs
 COPY src/ /opt/app/src/
@@ -34,7 +35,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     set -eux \
     && rust_target="$(cat /tmp/rust-target)" \
     && export RUSTFLAGS="-C linker=lld" \
-    && cargo build --release --locked --target="${rust_target}" \
+    && cargo build --release --locked --target="${rust_target}" ${CARGO_FEATURE_FLAGS} \
     && cp "target/${rust_target}/release/motdyn" /tmp/motdyn
 
 

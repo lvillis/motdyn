@@ -1,16 +1,18 @@
-use colored::Colorize;
 use std::collections::HashSet;
 use std::env;
 
+#[cfg(feature = "color")]
+use colored::Colorize;
 #[cfg(unix)]
-use libc::geteuid;
+use rustix::process::geteuid;
 
 use crate::config::MotdConfig;
 
 use super::types::{
-    HiddenField, ModuleKind, ModuleProfile, ModuleSelection, ModuleSource, OutputSettings,
-    PaintKind, RenderContext, RenderedItem, SectionKind, SystemSnapshot, UsageSummary, ViewerRole,
-    WelcomeResolution, WelcomeSource,
+    FailedLoginBucket, FailedLoginInfo, FailedLoginSeverity, HiddenField, LastLoginInfo,
+    LastLoginRecord, ModuleKind, ModuleProfile, ModuleSelection, ModuleSource, OutputSettings,
+    PaintKind, RenderContext, RenderedItem, SectionKind, SourceRelation, SystemSnapshot,
+    UsageSummary, ViewerRole, WelcomeResolution, WelcomeSource,
 };
 
 pub(super) fn build_verbose_items(
@@ -69,9 +71,13 @@ pub(super) fn build_verbose_items(
                 WelcomeSource::Default => "default".to_string(),
                 WelcomeSource::Literal => "literal".to_string(),
                 WelcomeSource::LocalFile => "local file".to_string(),
+                #[cfg(feature = "remote-welcome")]
                 WelcomeSource::RemoteFresh => "remote fetch".to_string(),
+                #[cfg(feature = "remote-welcome")]
                 WelcomeSource::CacheFresh => "fresh cache".to_string(),
+                #[cfg(feature = "remote-welcome")]
                 WelcomeSource::CacheRevalidated => "cache revalidated".to_string(),
+                #[cfg(feature = "remote-welcome")]
                 WelcomeSource::CacheStale => "stale cache fallback".to_string(),
             },
         },
@@ -150,6 +156,97 @@ pub(super) fn build_verbose_items(
             label: "Update source:".to_string(),
             value: snapshot.diagnostics.updates_source.clone(),
         });
+    }
+
+    if selection.modules.contains(&ModuleKind::LastLogin) {
+        match &snapshot.last_login {
+            LastLoginInfo::Recorded(record) => {
+                items.push(RenderedItem {
+                    label: "Last login record:".to_string(),
+                    value: format_last_login_verbose(record),
+                });
+                items.push(RenderedItem {
+                    label: "Last login kind:".to_string(),
+                    value: record.kind.label().to_string(),
+                });
+                if let Some(age) = &record.age {
+                    items.push(RenderedItem {
+                        label: "Last login age:".to_string(),
+                        value: age.clone(),
+                    });
+                }
+                if let Some(from) = &record.from {
+                    items.push(RenderedItem {
+                        label: "Last login source IP:".to_string(),
+                        value: from.clone(),
+                    });
+                }
+                if let Some(via) = &record.via {
+                    items.push(RenderedItem {
+                        label: "Last login via:".to_string(),
+                        value: via.clone(),
+                    });
+                }
+                if !matches!(record.source_relation, SourceRelation::Unknown) {
+                    items.push(RenderedItem {
+                        label: "Last login relation:".to_string(),
+                        value: record.source_relation.label().to_string(),
+                    });
+                }
+            }
+            LastLoginInfo::NeverRecorded => items.push(RenderedItem {
+                label: "Last login status:".to_string(),
+                value: "never recorded".to_string(),
+            }),
+            LastLoginInfo::Unavailable => {}
+        }
+    }
+
+    if selection.modules.contains(&ModuleKind::FailedLogin) {
+        match &snapshot.failed_login {
+            FailedLoginInfo::Summary(summary) => {
+                items.push(RenderedItem {
+                    label: "Failed login severity:".to_string(),
+                    value: summary.severity.label().to_string(),
+                });
+                items.push(RenderedItem {
+                    label: "Failed login window:".to_string(),
+                    value: format!(
+                        "24h={}, 7d={}, total={}",
+                        summary.count_24h, summary.count_7d, summary.total
+                    ),
+                });
+                if let Some(last_when) = &summary.last_when {
+                    items.push(RenderedItem {
+                        label: "Failed login last seen:".to_string(),
+                        value: last_when.clone(),
+                    });
+                }
+                if !summary.top_sources.is_empty() {
+                    items.push(RenderedItem {
+                        label: "Failed login top sources:".to_string(),
+                        value: format_buckets(&summary.top_sources),
+                    });
+                }
+                if !summary.top_vias.is_empty() {
+                    items.push(RenderedItem {
+                        label: "Failed login top entrypoints:".to_string(),
+                        value: format_buckets(&summary.top_vias),
+                    });
+                }
+                if summary.current_source_seen {
+                    items.push(RenderedItem {
+                        label: "Failed login relation:".to_string(),
+                        value: "current source appears in recent failures".to_string(),
+                    });
+                }
+            }
+            FailedLoginInfo::None => items.push(RenderedItem {
+                label: "Failed login status:".to_string(),
+                value: "none".to_string(),
+            }),
+            FailedLoginInfo::Unavailable => {}
+        }
     }
 
     if let Some(url) = &welcome.url {
@@ -237,20 +334,21 @@ pub(super) fn render_module_lines(
     snapshot: &SystemSnapshot,
     settings: &OutputSettings,
 ) -> Vec<String> {
+    let combine_usage_bar = should_combine_usage_bar(modules, snapshot, settings);
     let mut groups: Vec<(SectionKind, Vec<RenderedItem>)> = Vec::new();
 
     for module in modules {
-        let items = render_module_items(*module, snapshot, settings);
+        let items = render_module_items(*module, snapshot, settings, combine_usage_bar);
         if items.is_empty() {
             continue;
         }
 
         let section = module_section(*module);
-        if let Some((current_section, current_items)) = groups.last_mut() {
-            if *current_section == section {
-                current_items.extend(items);
-                continue;
-            }
+        if let Some((current_section, current_items)) = groups.last_mut()
+            && *current_section == section
+        {
+            current_items.extend(items);
+            continue;
         }
         groups.push((section, items));
     }
@@ -494,6 +592,8 @@ pub(super) fn default_modules() -> Vec<ModuleKind> {
         ModuleKind::Memory,
         ModuleKind::Swap,
         ModuleKind::Disk,
+        ModuleKind::LastLogin,
+        ModuleKind::FailedLogin,
     ]
 }
 
@@ -510,8 +610,8 @@ pub(super) fn basic_modules() -> Vec<ModuleKind> {
 
 pub(super) fn current_viewer_role() -> ViewerRole {
     #[cfg(unix)]
-    unsafe {
-        if geteuid() == 0 {
+    {
+        if geteuid().is_root() {
             return ViewerRole::Root;
         }
     }
@@ -525,13 +625,24 @@ pub(super) fn paint(text: impl Into<String>, kind: PaintKind, settings: &OutputS
         return text;
     }
 
-    match kind {
-        PaintKind::Label => text.bright_white().to_string(),
-        PaintKind::Header => text.bold().cyan().to_string(),
-        PaintKind::Cyan => text.bright_cyan().to_string(),
-        PaintKind::Yellow => text.bright_yellow().to_string(),
-        PaintKind::Green => text.bright_green().to_string(),
-        PaintKind::Magenta => text.bright_magenta().to_string(),
+    #[cfg(feature = "color")]
+    {
+        match kind {
+            PaintKind::Label => text.bright_white().to_string(),
+            PaintKind::Header => text.bold().cyan().to_string(),
+            PaintKind::Dim => text.white().to_string(),
+            PaintKind::Cyan => text.bright_cyan().to_string(),
+            PaintKind::Yellow => text.bright_yellow().to_string(),
+            PaintKind::Red => text.bright_red().to_string(),
+            PaintKind::Green => text.bright_green().to_string(),
+            PaintKind::Magenta => text.bright_magenta().to_string(),
+        }
+    }
+
+    #[cfg(not(feature = "color"))]
+    {
+        let _ = kind;
+        text
     }
 }
 
@@ -539,6 +650,7 @@ fn render_module_items(
     module: ModuleKind,
     snapshot: &SystemSnapshot,
     settings: &OutputSettings,
+    combine_usage_bar: bool,
 ) -> Vec<RenderedItem> {
     match module {
         ModuleKind::Host => vec![RenderedItem {
@@ -594,12 +706,9 @@ fn render_module_items(
                 settings,
             ),
         }],
-        ModuleKind::Memory => vec![RenderedItem {
-            label: "Memory used/total:".to_string(),
-            value: format_usage(snapshot.memory),
-        }],
+        ModuleKind::Memory => render_memory_items(snapshot, settings, combine_usage_bar),
         ModuleKind::Swap => {
-            if settings.hidden(HiddenField::Swap) {
+            if settings.hidden(HiddenField::Swap) || is_empty_usage(snapshot.swap) {
                 Vec::new()
             } else {
                 vec![RenderedItem {
@@ -608,14 +717,14 @@ fn render_module_items(
                 }]
             }
         }
-        ModuleKind::Disk => render_disk_items(snapshot, settings),
+        ModuleKind::Disk => render_disk_items(snapshot, settings, !combine_usage_bar),
         ModuleKind::LastLogin => vec![RenderedItem {
             label: "Last login:".to_string(),
-            value: paint(snapshot.last_login.clone(), PaintKind::Yellow, settings),
+            value: render_last_login_value(&snapshot.last_login, settings),
         }],
         ModuleKind::FailedLogin => vec![RenderedItem {
             label: "Failed login:".to_string(),
-            value: paint_failed_login(snapshot.failed_login.clone(), settings),
+            value: render_failed_login_value(&snapshot.failed_login, settings),
         }],
         ModuleKind::Services => render_service_items(snapshot, settings),
         ModuleKind::Updates => vec![RenderedItem {
@@ -696,13 +805,40 @@ fn render_time_items(snapshot: &SystemSnapshot, settings: &OutputSettings) -> Ve
     }]
 }
 
-fn render_disk_items(snapshot: &SystemSnapshot, settings: &OutputSettings) -> Vec<RenderedItem> {
+fn render_memory_items(
+    snapshot: &SystemSnapshot,
+    _settings: &OutputSettings,
+    combine_usage_bar: bool,
+) -> Vec<RenderedItem> {
+    if combine_usage_bar {
+        return snapshot
+            .root_disk
+            .map(|root_disk| RenderedItem {
+                label: "Resource use:".to_string(),
+                value: format_combined_usage_bar(snapshot.memory, root_disk, _settings),
+            })
+            .into_iter()
+            .collect();
+    }
+
+    vec![RenderedItem {
+        label: "Memory used/total:".to_string(),
+        value: format_usage(snapshot.memory),
+    }]
+}
+
+fn render_disk_items(
+    snapshot: &SystemSnapshot,
+    settings: &OutputSettings,
+    include_root: bool,
+) -> Vec<RenderedItem> {
     snapshot
         .disk_items
         .iter()
         .filter(|item| {
-            !(settings.hidden(HiddenField::NfsDisks)
-                && item.label.eq_ignore_ascii_case("Disk usage (nfs):"))
+            (include_root || !item.label.eq_ignore_ascii_case("Disk usage (root):"))
+                && !(settings.hidden(HiddenField::NfsDisks)
+                    && item.label.eq_ignore_ascii_case("Disk usage (nfs):"))
         })
         .cloned()
         .collect()
@@ -782,12 +918,95 @@ fn format_usage(summary: UsageSummary) -> String {
     )
 }
 
-fn yes_no(value: bool) -> &'static str {
-    if value {
-        "yes"
+fn format_combined_usage_bar(
+    memory: UsageSummary,
+    root_disk: UsageSummary,
+    settings: &OutputSettings,
+) -> String {
+    format!(
+        "{}  {}",
+        format_usage_meter("mem", memory.ratio, settings),
+        format_usage_meter("disk", root_disk.ratio, settings)
+    )
+}
+
+fn format_percent(value: f64) -> String {
+    format!("{:>3.0}%", value.clamp(0.0, 100.0))
+}
+
+fn format_bar(value: f64, width: usize, settings: &OutputSettings) -> String {
+    let clamped = value.clamp(0.0, 100.0);
+    let filled = ((clamped / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+
+    let (filled_char, empty_char) = if settings.plain {
+        ('#', '-')
     } else {
-        "no"
+        ('█', '░')
+    };
+
+    std::iter::repeat_n(filled_char, filled)
+        .chain(std::iter::repeat_n(
+            empty_char,
+            width.saturating_sub(filled),
+        ))
+        .collect()
+}
+
+fn format_usage_meter(label: &str, ratio: f64, settings: &OutputSettings) -> String {
+    let label = paint(label, PaintKind::Dim, settings);
+    let meter = match usage_status_label(ratio) {
+        Some(status) => format!(
+            "{} {} {}",
+            format_percent(ratio),
+            status,
+            format_bar(ratio, 10, settings)
+        ),
+        None => format!(
+            "{} {}",
+            format_percent(ratio),
+            format_bar(ratio, 10, settings)
+        ),
+    };
+    format!(
+        "{} {}",
+        label,
+        paint(meter, usage_paint_kind(ratio), settings)
+    )
+}
+
+fn usage_paint_kind(ratio: f64) -> PaintKind {
+    let _ = ratio;
+    PaintKind::Dim
+}
+
+fn usage_status_label(ratio: f64) -> Option<&'static str> {
+    if ratio >= 95.0 {
+        Some("critical")
+    } else if ratio >= 85.0 {
+        Some("high")
+    } else {
+        None
     }
+}
+
+fn is_empty_usage(summary: UsageSummary) -> bool {
+    summary.total_gb <= f64::EPSILON
+}
+
+fn should_combine_usage_bar(
+    modules: &[ModuleKind],
+    snapshot: &SystemSnapshot,
+    settings: &OutputSettings,
+) -> bool {
+    !settings.compact
+        && modules.contains(&ModuleKind::Memory)
+        && modules.contains(&ModuleKind::Disk)
+        && snapshot.root_disk.is_some()
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn command_exists(command: &str) -> bool {
@@ -806,11 +1025,146 @@ fn paint_service_state(value: String, settings: &OutputSettings) -> String {
     }
 }
 
-fn paint_failed_login(value: String, settings: &OutputSettings) -> String {
-    match value.as_str() {
-        "none" => paint(value, PaintKind::Green, settings),
-        "unavailable" => paint(value, PaintKind::Yellow, settings),
-        _ => paint(value, PaintKind::Yellow, settings),
+fn render_last_login_value(info: &LastLoginInfo, settings: &OutputSettings) -> String {
+    match info {
+        LastLoginInfo::Unavailable => paint("unavailable", PaintKind::Yellow, settings),
+        LastLoginInfo::NeverRecorded => paint("never recorded", PaintKind::Green, settings),
+        LastLoginInfo::Recorded(record) => {
+            let value = if settings.compact {
+                format_last_login_compact(record)
+            } else {
+                format_last_login_full(record)
+            };
+            paint(value, PaintKind::Yellow, settings)
+        }
+    }
+}
+
+fn render_failed_login_value(info: &FailedLoginInfo, settings: &OutputSettings) -> String {
+    match info {
+        FailedLoginInfo::Unavailable => paint("unavailable", PaintKind::Yellow, settings),
+        FailedLoginInfo::None => paint("none", PaintKind::Green, settings),
+        FailedLoginInfo::Summary(summary) => {
+            let value = if settings.compact {
+                format_failed_login_compact(summary)
+            } else {
+                format_failed_login_full(summary)
+            };
+            paint_failed_login(value, summary.severity, settings)
+        }
+    }
+}
+
+fn format_last_login_full(record: &LastLoginRecord) -> String {
+    let mut value = record.age.clone().unwrap_or_else(|| record.when.clone());
+    if let Some(from) = &record.from {
+        value.push_str(&format!(" from {}", from));
+    }
+    if let Some(via) = &record.via {
+        value.push_str(&format!(" via {}", via));
+    }
+    if matches!(record.source_relation, SourceRelation::Different) {
+        value.push_str(", different source");
+    }
+    value
+}
+
+fn format_last_login_verbose(record: &LastLoginRecord) -> String {
+    let mut parts = vec![record.when.clone()];
+    if let Some(age) = &record.age {
+        parts.push(age.clone());
+    }
+    if let Some(from) = &record.from {
+        parts.push(format!("from {}", from));
+    }
+    if let Some(via) = &record.via {
+        parts.push(format!("via {}", via));
+    }
+    if !matches!(record.kind, super::types::LoginSessionKind::Unknown) {
+        parts.push(record.kind.label().to_string());
+    }
+    if matches!(record.source_relation, SourceRelation::Different) {
+        parts.push(record.source_relation.label().to_string());
+    }
+    parts.join(", ")
+}
+
+fn format_last_login_compact(record: &LastLoginRecord) -> String {
+    let mut value = record.age.clone().unwrap_or_else(|| record.when.clone());
+    if let Some(from) = &record.from {
+        value.push_str(&format!(" from {}", from));
+    }
+    if let Some(via) = &record.via {
+        value.push_str(&format!(" via {}", via));
+    }
+    if matches!(record.source_relation, SourceRelation::Different) {
+        value.push_str(", different source");
+    }
+    value
+}
+
+fn format_failed_login_full(summary: &super::types::FailedLoginSummary) -> String {
+    let mut parts = vec![summary.severity.label().to_string()];
+    if summary.count_24h > 0 || summary.count_7d > 0 {
+        parts.push(format!(
+            "{}/24h, {}/7d",
+            summary.count_24h, summary.count_7d
+        ));
+    } else {
+        parts.push(format_failure_total(summary.total));
+    }
+    if let Some(top_source) = summary.top_sources.first() {
+        if summary.top_sources.len() > 1 || top_source.count > 1 {
+            parts.push(format!("top {} ({})", top_source.value, top_source.count));
+        } else {
+            parts.push(format!("from {}", top_source.value));
+        }
+    } else if let Some(last_from) = &summary.last_from {
+        parts.push(format!("from {}", last_from));
+    }
+    if summary.current_source_seen {
+        parts.push("current source seen".to_string());
+    }
+    parts.join(", ")
+}
+
+fn format_failed_login_compact(summary: &super::types::FailedLoginSummary) -> String {
+    let mut parts = vec![summary.severity.label().to_string()];
+    if summary.count_24h > 0 {
+        parts.push(format!("{}/24h", summary.count_24h));
+    } else if summary.count_7d > 0 {
+        parts.push(format!("{}/7d", summary.count_7d));
+    } else {
+        parts.push(format_failure_total(summary.total));
+    }
+    if let Some(top_source) = summary.top_sources.first() {
+        parts.push(format!("top {} ({})", top_source.value, top_source.count));
+    } else if let Some(last_from) = &summary.last_from {
+        parts.push(format!("from {}", last_from));
+    }
+    if summary.current_source_seen {
+        parts.push("current source".to_string());
+    }
+    parts.join(", ")
+}
+
+fn format_failure_total(total: usize) -> String {
+    if total == 1 {
+        "1 older failure".to_string()
+    } else {
+        format!("{} older failures", total)
+    }
+}
+
+fn paint_failed_login(
+    value: String,
+    severity: FailedLoginSeverity,
+    settings: &OutputSettings,
+) -> String {
+    match severity {
+        FailedLoginSeverity::Low => paint(value, PaintKind::Yellow, settings),
+        FailedLoginSeverity::Warn => paint(value, PaintKind::Magenta, settings),
+        FailedLoginSeverity::High => paint(value, PaintKind::Red, settings),
     }
 }
 
@@ -902,4 +1256,12 @@ fn normalize_disk_compact_value(value: &str) -> String {
         .split_once("=>")
         .map(|(_, rest)| rest.trim().to_string())
         .unwrap_or_else(|| value.to_string())
+}
+
+fn format_buckets(buckets: &[FailedLoginBucket]) -> String {
+    buckets
+        .iter()
+        .map(|bucket| format!("{} ({})", bucket.value, bucket.count))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

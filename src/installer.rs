@@ -5,8 +5,6 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::ValueEnum;
-
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -24,19 +22,25 @@ const USER_BLOCK_END: &str = "# <<< motdyn <<<";
 
 type Result<T> = std::result::Result<T, InstallerError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserProfileTarget {
-    #[value(name = "profile")]
     Profile,
-    #[value(name = "bash_profile")]
     BashProfile,
-    #[value(name = "bash_login")]
     BashLogin,
-    #[value(name = "zprofile")]
     Zprofile,
 }
 
 impl UserProfileTarget {
+    pub fn parse_name(value: &str) -> Option<Self> {
+        match value {
+            "profile" => Some(Self::Profile),
+            "bash_profile" => Some(Self::BashProfile),
+            "bash_login" => Some(Self::BashLogin),
+            "zprofile" => Some(Self::Zprofile),
+            _ => None,
+        }
+    }
+
     fn filename(self) -> &'static str {
         match self {
             Self::Profile => ".profile",

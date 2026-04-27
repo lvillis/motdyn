@@ -1,23 +1,35 @@
-use reqx::blocking::Client;
-use reqx::prelude::RedirectPolicy;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(feature = "remote-welcome")]
+use std::path::Path;
+use std::path::PathBuf;
+
+#[cfg(feature = "remote-welcome")]
+use reqx::blocking::Client;
+#[cfg(feature = "remote-welcome")]
+use reqx::prelude::RedirectPolicy;
+#[cfg(feature = "remote-welcome")]
+use std::time::Duration;
+#[cfg(feature = "remote-welcome")]
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(feature = "remote-welcome")]
 use url::{Position, Url};
 
-use crate::config::{expand_tilde, MotdConfig};
+use crate::config::{MotdConfig, expand_tilde};
 
 use super::types::{
-    RemoteWelcomeSettings, WelcomeCacheEntry, WelcomeIssue, WelcomeResolution, WelcomeSource,
     DEFAULT_WELCOME, DEFAULT_WELCOME_CACHE_PATH, DEFAULT_WELCOME_CACHE_TTL_SECS,
-    DEFAULT_WELCOME_TIMEOUT_MS, MAX_WELCOME_BODY_BYTES,
+    DEFAULT_WELCOME_TIMEOUT_MS, RemoteWelcomeSettings, WelcomeIssue, WelcomeResolution,
+    WelcomeSource,
 };
+#[cfg(feature = "remote-welcome")]
+use super::types::{MAX_WELCOME_BODY_BYTES, WelcomeCacheEntry};
 
 enum WelcomeAttempt {
     Resolved(WelcomeResolution),
     Unusable(Vec<WelcomeIssue>),
 }
 
+#[cfg(feature = "remote-welcome")]
 struct RemoteFetchResult {
     body: String,
     etag: Option<String>,
@@ -103,6 +115,7 @@ fn default_welcome(settings: RemoteWelcomeSettings) -> WelcomeResolution {
 }
 
 fn resolve_welcome_source(raw_source: &str, settings: &RemoteWelcomeSettings) -> WelcomeAttempt {
+    #[cfg(feature = "remote-welcome")]
     if let Ok(url) = Url::parse(raw_source) {
         return match url.scheme() {
             "file" => resolve_file_url_source(&url, settings),
@@ -113,6 +126,13 @@ fn resolve_welcome_source(raw_source: &str, settings: &RemoteWelcomeSettings) ->
                 other.to_string(),
             )]),
         };
+    }
+
+    #[cfg(not(feature = "remote-welcome"))]
+    if let Some(scheme) = parse_url_scheme(raw_source) {
+        return WelcomeAttempt::Unusable(vec![WelcomeIssue::UrlSupportDisabled(
+            scheme.to_string(),
+        )]);
     }
 
     if looks_like_local_path(raw_source) {
@@ -133,13 +153,15 @@ fn resolve_welcome_source(raw_source: &str, settings: &RemoteWelcomeSettings) ->
     })
 }
 
+#[cfg(feature = "remote-welcome")]
 fn resolve_file_url_source(url: &Url, settings: &RemoteWelcomeSettings) -> WelcomeAttempt {
-    if let Some(host) = url.host_str() {
-        if !host.is_empty() && host != "localhost" {
-            return WelcomeAttempt::Unusable(vec![WelcomeIssue::FileUrlUnsupportedHost(
-                host.to_string(),
-            )]);
-        }
+    if let Some(host) = url.host_str()
+        && !host.is_empty()
+        && host != "localhost"
+    {
+        return WelcomeAttempt::Unusable(vec![WelcomeIssue::FileUrlUnsupportedHost(
+            host.to_string(),
+        )]);
     }
 
     let path = match url.to_file_path() {
@@ -181,6 +203,7 @@ fn resolve_local_file_source(
     })
 }
 
+#[cfg(feature = "remote-welcome")]
 fn resolve_remote_welcome_source(
     parsed_url: Url,
     settings: &RemoteWelcomeSettings,
@@ -195,17 +218,17 @@ fn resolve_remote_welcome_source(
         }
     };
 
-    if let Some(entry) = cached_entry.as_ref() {
-        if cache_entry_is_fresh(entry, settings.cache_ttl_secs) {
-            return WelcomeAttempt::Resolved(WelcomeResolution {
-                text: entry.body.clone(),
-                source: WelcomeSource::CacheFresh,
-                source_detail: format!("cache hit ({})", settings.cache_path.display()),
-                url: Some(normalized_url),
-                settings: settings.clone(),
-                warnings,
-            });
-        }
+    if let Some(entry) = cached_entry.as_ref()
+        && cache_entry_is_fresh(entry, settings.cache_ttl_secs)
+    {
+        return WelcomeAttempt::Resolved(WelcomeResolution {
+            text: entry.body.clone(),
+            source: WelcomeSource::CacheFresh,
+            source_detail: format!("cache hit ({})", settings.cache_path.display()),
+            url: Some(normalized_url),
+            settings: settings.clone(),
+            warnings,
+        });
     }
 
     if parsed_url.scheme() == "http" && !settings.allow_http {
@@ -303,6 +326,22 @@ fn looks_like_local_path(raw: &str) -> bool {
     raw.starts_with("~/") || raw.starts_with('/') || raw.starts_with("./") || raw.starts_with("../")
 }
 
+#[cfg(not(feature = "remote-welcome"))]
+fn parse_url_scheme(raw: &str) -> Option<&str> {
+    let (scheme, _) = raw.split_once(':')?;
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    if chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')) {
+        Some(scheme)
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "remote-welcome")]
 fn normalize_remote_welcome_url(mut url: Url) -> Url {
     url.set_fragment(None);
 
@@ -318,6 +357,7 @@ fn normalize_remote_welcome_url(mut url: Url) -> Url {
     url
 }
 
+#[cfg(feature = "remote-welcome")]
 fn cache_or_unusable(
     settings: &RemoteWelcomeSettings,
     url: String,
@@ -341,6 +381,7 @@ fn cache_or_unusable(
     WelcomeAttempt::Unusable(warnings)
 }
 
+#[cfg(feature = "remote-welcome")]
 fn fetch_remote_welcome_text(
     parsed_url: &Url,
     settings: &RemoteWelcomeSettings,
@@ -421,6 +462,7 @@ fn fetch_remote_welcome_text(
     }
 }
 
+#[cfg(feature = "remote-welcome")]
 pub(super) fn read_welcome_cache(path: &Path) -> Result<Option<WelcomeCacheEntry>, WelcomeIssue> {
     if !path.exists() {
         return Ok(None);
@@ -451,10 +493,10 @@ pub(super) fn read_welcome_cache(path: &Path) -> Result<Option<WelcomeCacheEntry
             if !value.is_empty() {
                 etag = Some(value.to_string());
             }
-        } else if let Some(value) = line.strip_prefix("last_modified=") {
-            if !value.is_empty() {
-                last_modified = Some(value.to_string());
-            }
+        } else if let Some(value) = line.strip_prefix("last_modified=")
+            && !value.is_empty()
+        {
+            last_modified = Some(value.to_string());
         }
     }
 
@@ -481,6 +523,7 @@ pub(super) fn read_welcome_cache(path: &Path) -> Result<Option<WelcomeCacheEntry
     }))
 }
 
+#[cfg(feature = "remote-welcome")]
 pub(super) fn write_welcome_cache(
     path: &Path,
     entry: &WelcomeCacheEntry,
@@ -508,10 +551,12 @@ pub(super) fn write_welcome_cache(
     })
 }
 
+#[cfg(feature = "remote-welcome")]
 fn cache_entry_is_fresh(entry: &WelcomeCacheEntry, ttl_secs: u64) -> bool {
     current_unix_secs().saturating_sub(entry.fetched_at_secs) <= ttl_secs
 }
 
+#[cfg(feature = "remote-welcome")]
 pub(super) fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

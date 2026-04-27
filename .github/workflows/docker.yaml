@@ -58,6 +58,21 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - name: Derive slim image metadata
+        id: meta-slim
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=slim,enable={{is_default_branch}}
+            type=semver,pattern={{version}}-slim,value=${{ github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}}-slim,value=${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.title=motdyn slim
+            org.opencontainers.image.description=Tiny motdyn template renderer for container startup messages.
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
       - name: Build and push image
         uses: docker/build-push-action@v7
         with:
@@ -70,3 +85,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=motdyn-docker
           cache-to: type=gha,mode=max,scope=motdyn-docker
+
+      - name: Build and push slim image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-slim.outputs.tags }}
+          labels: ${{ steps.meta-slim.outputs.labels }}
+          build-args: |
+            CARGO_FEATURE_FLAGS=--no-default-features --features slim
+          cache-from: type=gha,scope=motdyn-docker-slim
+          cache-to: type=gha,mode=max,scope=motdyn-docker-slim

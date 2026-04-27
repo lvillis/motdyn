@@ -1,4 +1,6 @@
-use chrono::Local;
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, Local, LocalResult, NaiveDateTime, TimeZone,
+};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
@@ -8,17 +10,20 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use libc::{endutxent, getutxent, setutxent, statvfs, USER_PROCESS};
-#[cfg(unix)]
-use std::ffi::CString;
-#[cfg(unix)]
-use std::mem::MaybeUninit;
+use rustix::fs::statvfs;
 
 use crate::config::MotdConfig;
 
 use super::types::{
-    LinuxUtmpRecord, ModuleKind, NetworkProbeError, ProbeIssue, RenderedItem, SnapshotDiagnostics,
-    SystemSnapshot, UsageSummary,
+    FailedLoginBucket, FailedLoginInfo, FailedLoginSeverity, LastLoginInfo, LastLoginRecord,
+    LoginSessionKind, ModuleKind, NetworkProbeError, ProbeIssue, RenderedItem, SnapshotDiagnostics,
+    SourceRelation, SystemSnapshot, UsageSummary,
+};
+
+#[cfg(target_os = "linux")]
+use super::types::{
+    LINUX_USER_PROCESS, LINUX_UTMP_RECORD_SIZE, LINUX_UTMP_TYPE_OFFSET, LINUX_UTMP_USER_LEN,
+    LINUX_UTMP_USER_OFFSET,
 };
 
 const CORE_PROBE_TIMEOUT_MS: u64 = 120;
@@ -33,6 +38,21 @@ pub(super) struct TimedCommandOutput {
     pub(super) stderr: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ParsedLastLoginRecord {
+    pub(super) when: String,
+    pub(super) from: Option<String>,
+    pub(super) via: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FailedLoginEvent {
+    pub(super) when: Option<DateTime<Local>>,
+    pub(super) when_raw: String,
+    pub(super) from: Option<String>,
+    pub(super) via: Option<String>,
+}
+
 pub(super) fn collect_snapshot(
     requested_modules: &[ModuleKind],
     cfg: &MotdConfig,
@@ -40,7 +60,8 @@ pub(super) fn collect_snapshot(
     let mut diagnostics = SnapshotDiagnostics::default();
     let ((os_name, os_version), os_source) = get_os_info();
     diagnostics.os_source = os_source.to_string();
-    let now_str_with_tz = Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string();
+    let now = Local::now();
+    let now_str_with_tz = now.format("%Y-%m-%d %H:%M:%S %:z").to_string();
     let uptime_str = parse_uptime().unwrap_or_else(|| "unknown".to_string());
     let load_average = if module_enabled(requested_modules, ModuleKind::Load) {
         diagnostics.load_source = "/proc/loadavg".to_string();
@@ -68,32 +89,30 @@ pub(super) fn collect_snapshot(
     diagnostics.network_source = "ip route/ip addr".to_string();
     let last_login = if module_enabled(requested_modules, ModuleKind::LastLogin) {
         diagnostics.last_login_source = "lastlog".to_string();
-        match probe_last_login(&current_user) {
-            Ok(Some(value)) => value,
-            Ok(None) => "never recorded".to_string(),
+        match probe_last_login(&current_user, &from_ip, now) {
+            Ok(value) => value,
             Err(err) => {
                 diagnostics.degrade(ModuleKind::LastLogin, ProbeIssue::LastLoginProbeFailed(err));
-                "unavailable".to_string()
+                LastLoginInfo::Unavailable
             }
         }
     } else {
-        String::new()
+        LastLoginInfo::Unavailable
     };
     let failed_login = if module_enabled(requested_modules, ModuleKind::FailedLogin) {
         diagnostics.failed_login_source = "lastb".to_string();
-        match probe_failed_login(&current_user) {
-            Ok(Some(value)) => value,
-            Ok(None) => "none".to_string(),
+        match probe_failed_login(&current_user, &from_ip, now) {
+            Ok(value) => value,
             Err(err) => {
                 diagnostics.degrade(
                     ModuleKind::FailedLogin,
                     ProbeIssue::FailedLoginProbeFailed(err),
                 );
-                "unavailable".to_string()
+                FailedLoginInfo::Unavailable
             }
         }
     } else {
-        String::new()
+        FailedLoginInfo::Unavailable
     };
     let service_items = if module_enabled(requested_modules, ModuleKind::Services) {
         diagnostics.service_status_source = "systemctl is-active".to_string();
@@ -172,6 +191,8 @@ pub(super) fn collect_snapshot(
         diagnostics.note(ProbeIssue::SshConnectionMissing);
     }
 
+    let (root_disk, disk_items) = collect_disk_usage_items();
+
     SystemSnapshot {
         host_name,
         main_iface,
@@ -190,7 +211,8 @@ pub(super) fn collect_snapshot(
         cpu_count,
         memory: usage_summary(mem_total, mem_free),
         swap: usage_summary(swap_total, swap_free),
-        disk_items: collect_disk_usage_items(),
+        root_disk,
+        disk_items,
         last_login,
         failed_login,
         service_items,
@@ -207,7 +229,7 @@ pub(super) fn parse_loadavg_content(content: &str) -> Option<String> {
     Some(format!("{} {} {}", one, five, fifteen))
 }
 
-pub(super) fn parse_lastlog_output(output: &str) -> Option<Option<String>> {
+pub(super) fn parse_lastlog_output(output: &str) -> Option<Option<ParsedLastLoginRecord>> {
     let mut lines = output.lines().filter(|line| !line.trim().is_empty());
     let header = lines.next()?;
     let data = lines.next()?;
@@ -223,25 +245,24 @@ pub(super) fn parse_lastlog_output(output: &str) -> Option<Option<String>> {
         return None;
     }
 
-    let port = slice_column(data, port_start, from_start);
-    let from = slice_column(data, from_start, latest_start);
+    let via = normalize_detail_field(&slice_column(data, port_start, from_start));
+    let from = normalize_detail_field(&slice_column(data, from_start, latest_start));
     let latest = data.get(latest_start..)?.trim();
     if latest.is_empty() {
         return None;
     }
 
-    let mut parts = vec![latest.to_string()];
-    if !from.is_empty() {
-        parts.push(format!("from {}", from));
-    }
-    if !port.is_empty() {
-        parts.push(format!("via {}", port));
-    }
-
-    Some(Some(parts.join(", ")))
+    Some(Some(ParsedLastLoginRecord {
+        when: latest.to_string(),
+        from,
+        via,
+    }))
 }
 
-pub(super) fn parse_lastb_output(output: &str) -> Option<Option<String>> {
+pub(super) fn parse_lastb_output(
+    output: &str,
+    now: DateTime<Local>,
+) -> Option<Vec<FailedLoginEvent>> {
     let entries = output
         .lines()
         .map(str::trim)
@@ -249,32 +270,30 @@ pub(super) fn parse_lastb_output(output: &str) -> Option<Option<String>> {
         .collect::<Vec<_>>();
 
     if entries.is_empty() {
-        return Some(None);
+        return Some(Vec::new());
     }
 
-    let first = entries.first()?;
-    let mut parts = first.split_whitespace();
-    let _user = parts.next()?;
-    let port = parts.next().unwrap_or("unknown");
-    let source = parts.next().unwrap_or("unknown");
-    let when = parts.collect::<Vec<_>>().join(" ");
+    let mut parsed = Vec::new();
+    for line in entries {
+        let mut parts = line.split_whitespace();
+        let _user = parts.next()?;
+        let via = normalize_detail_field(parts.next().unwrap_or_default());
+        let from = normalize_detail_field(parts.next().unwrap_or_default());
+        let when_tokens = parts.take(4).collect::<Vec<_>>();
+        if when_tokens.len() < 4 {
+            return None;
+        }
 
-    let mut summary = vec![if entries.len() == 1 {
-        "1 recent failure".to_string()
-    } else {
-        format!("{} recent failures", entries.len())
-    }];
-    if source != "unknown" {
-        summary.push(format!("last from {}", source));
-    }
-    if port != "unknown" {
-        summary.push(format!("via {}", port));
-    }
-    if !when.is_empty() {
-        summary.push(format!("at {}", when));
+        let when_raw = when_tokens.join(" ");
+        parsed.push(FailedLoginEvent {
+            when: parse_lastb_timestamp(&when_raw, now),
+            when_raw,
+            from,
+            via,
+        });
     }
 
-    Some(Some(summary.join(", ")))
+    Some(parsed)
 }
 
 pub(super) fn parse_apt_upgradable_output(output: &str) -> usize {
@@ -387,10 +406,10 @@ pub(super) fn parse_cpuinfo_content(content: &str) -> (String, usize) {
             if let Some(val) = imp_str.split(':').nth(1) {
                 cpu_implementer = val.trim().to_lowercase();
             }
-        } else if let Some(part_str) = line.strip_prefix("CPU part") {
-            if let Some(val) = part_str.split(':').nth(1) {
-                cpu_part = val.trim().to_lowercase();
-            }
+        } else if let Some(part_str) = line.strip_prefix("CPU part")
+            && let Some(val) = part_str.split(':').nth(1)
+        {
+            cpu_part = val.trim().to_lowercase();
         }
     }
 
@@ -477,20 +496,18 @@ pub(super) fn to_gb_and_ratio(total_kb: u64, free_kb: u64) -> (f64, f64, f64) {
 pub(super) fn count_logged_in_users_from_linux_utmp_file(path: &Path) -> Option<usize> {
     let mut file = File::open(path).ok()?;
     let mut count = 0;
+    let mut record = [0_u8; LINUX_UTMP_RECORD_SIZE];
 
     loop {
-        let mut record = MaybeUninit::<LinuxUtmpRecord>::zeroed();
-        let buffer = unsafe {
-            std::slice::from_raw_parts_mut(
-                record.as_mut_ptr().cast::<u8>(),
-                std::mem::size_of::<LinuxUtmpRecord>(),
-            )
-        };
-
-        match file.read_exact(buffer) {
+        match file.read_exact(&mut record) {
             Ok(()) => {
-                let record = unsafe { record.assume_init() };
-                if record.ut_type == USER_PROCESS && record.ut_user[0] != 0 {
+                let ut_type = i16::from_ne_bytes([
+                    record[LINUX_UTMP_TYPE_OFFSET],
+                    record[LINUX_UTMP_TYPE_OFFSET + 1],
+                ]);
+                let user =
+                    &record[LINUX_UTMP_USER_OFFSET..LINUX_UTMP_USER_OFFSET + LINUX_UTMP_USER_LEN];
+                if ut_type == LINUX_USER_PROCESS && user[0] != 0 {
                     count += 1;
                 }
             }
@@ -578,7 +595,11 @@ fn module_enabled(requested_modules: &[ModuleKind], module: ModuleKind) -> bool 
     requested_modules.contains(&module)
 }
 
-fn probe_last_login(user: &str) -> Result<Option<String>, String> {
+fn probe_last_login(
+    user: &str,
+    current_source_ip: &str,
+    now: DateTime<Local>,
+) -> Result<LastLoginInfo, String> {
     if user == "unknown" {
         return Err("current user is unknown".to_string());
     }
@@ -600,10 +621,23 @@ fn probe_last_login(user: &str) -> Result<Option<String>, String> {
         return Err(format!("'lastlog -u {}' exited with {}", user, detail));
     }
 
-    parse_lastlog_output(&output.stdout).ok_or_else(|| "unexpected 'lastlog' output".to_string())
+    match parse_lastlog_output(&output.stdout)
+        .ok_or_else(|| "unexpected 'lastlog' output".to_string())?
+    {
+        Some(record) => Ok(LastLoginInfo::Recorded(enrich_last_login_record(
+            record,
+            current_source_ip,
+            now,
+        ))),
+        None => Ok(LastLoginInfo::NeverRecorded),
+    }
 }
 
-fn probe_failed_login(user: &str) -> Result<Option<String>, String> {
+fn probe_failed_login(
+    user: &str,
+    current_source_ip: &str,
+    now: DateTime<Local>,
+) -> Result<FailedLoginInfo, String> {
     if user == "unknown" {
         return Err("current user is unknown".to_string());
     }
@@ -625,7 +659,226 @@ fn probe_failed_login(user: &str) -> Result<Option<String>, String> {
         return Err(format!("'lastb -w -n 20 {}' exited with {}", user, detail));
     }
 
-    parse_lastb_output(&output.stdout).ok_or_else(|| "unexpected 'lastb' output".to_string())
+    let events = parse_lastb_output(&output.stdout, now)
+        .ok_or_else(|| "unexpected 'lastb' output".to_string())?;
+    Ok(summarize_failed_login_events(
+        &events,
+        current_source_ip,
+        now,
+    ))
+}
+
+fn enrich_last_login_record(
+    record: ParsedLastLoginRecord,
+    current_source_ip: &str,
+    now: DateTime<Local>,
+) -> LastLoginRecord {
+    let kind = classify_login_kind(record.via.as_deref(), record.from.as_deref());
+    let age =
+        parse_lastlog_timestamp(&record.when).map(|timestamp| format_relative_age(now, timestamp));
+    let source_relation = compare_sources(record.from.as_deref(), current_source_ip);
+
+    LastLoginRecord {
+        when: record.when,
+        from: record.from,
+        via: record.via,
+        kind,
+        age,
+        source_relation,
+    }
+}
+
+pub(super) fn summarize_failed_login_events(
+    events: &[FailedLoginEvent],
+    current_source_ip: &str,
+    now: DateTime<Local>,
+) -> FailedLoginInfo {
+    if events.is_empty() {
+        return FailedLoginInfo::None;
+    }
+
+    let count_24h = events
+        .iter()
+        .filter_map(|event| event.when)
+        .filter(|when| is_within_window(now, *when, ChronoDuration::hours(24)))
+        .count();
+    let count_7d = events
+        .iter()
+        .filter_map(|event| event.when)
+        .filter(|when| is_within_window(now, *when, ChronoDuration::days(7)))
+        .count();
+    let top_sources = top_buckets(events.iter().filter_map(|event| event.from.as_deref()), 3);
+    let top_vias = top_buckets(events.iter().filter_map(|event| event.via.as_deref()), 3);
+    let current_source_seen = current_source_ip != "unknown"
+        && events
+            .iter()
+            .any(|event| event.from.as_deref() == Some(current_source_ip));
+    let unique_sources = events
+        .iter()
+        .filter_map(|event| event.from.as_ref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let severity =
+        classify_failed_login_severity(count_24h, count_7d, unique_sources, current_source_seen);
+    let last_event = &events[0];
+
+    FailedLoginInfo::Summary(super::types::FailedLoginSummary {
+        total: events.len(),
+        count_24h,
+        count_7d,
+        last_when: Some(last_event.when_raw.clone()),
+        last_from: last_event.from.clone(),
+        last_via: last_event.via.clone(),
+        top_sources,
+        top_vias,
+        unique_sources,
+        severity,
+        current_source_seen,
+    })
+}
+
+fn classify_failed_login_severity(
+    count_24h: usize,
+    count_7d: usize,
+    unique_sources: usize,
+    current_source_seen: bool,
+) -> FailedLoginSeverity {
+    if current_source_seen || count_24h >= 10 || (count_24h >= 5 && unique_sources >= 3) {
+        FailedLoginSeverity::High
+    } else if count_24h >= 3 || count_7d >= 10 {
+        FailedLoginSeverity::Warn
+    } else {
+        FailedLoginSeverity::Low
+    }
+}
+
+fn top_buckets<'a>(values: impl Iterator<Item = &'a str>, limit: usize) -> Vec<FailedLoginBucket> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for value in values {
+        *counts.entry(value.to_string()).or_default() += 1;
+    }
+
+    let mut buckets = counts
+        .into_iter()
+        .map(|(value, count)| FailedLoginBucket { value, count })
+        .collect::<Vec<_>>();
+    buckets.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.value.cmp(&right.value))
+    });
+    buckets.truncate(limit);
+    buckets
+}
+
+fn normalize_detail_field(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || matches!(trimmed, "**" | "***" | "unknown") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn classify_login_kind(via: Option<&str>, from: Option<&str>) -> LoginSessionKind {
+    let via = via.unwrap_or_default().to_ascii_lowercase();
+    if via.starts_with("pts/") || via.contains("ssh") {
+        return LoginSessionKind::Ssh;
+    }
+    if via.starts_with("tty") || via.contains("console") {
+        return LoginSessionKind::Console;
+    }
+
+    let from = from.unwrap_or_default().to_ascii_lowercase();
+    if !from.is_empty() && from != "localhost" && from != ":0" {
+        LoginSessionKind::Ssh
+    } else {
+        LoginSessionKind::Unknown
+    }
+}
+
+fn compare_sources(previous: Option<&str>, current_source_ip: &str) -> SourceRelation {
+    if current_source_ip == "unknown" {
+        return SourceRelation::Unknown;
+    }
+
+    match previous {
+        Some(previous) if previous == current_source_ip => SourceRelation::Same,
+        Some(_) => SourceRelation::Different,
+        None => SourceRelation::Unknown,
+    }
+}
+
+fn parse_lastlog_timestamp(value: &str) -> Option<DateTime<Local>> {
+    if let Ok(timestamp) = DateTime::parse_from_str(value, "%a %b %e %H:%M:%S %z %Y") {
+        return Some(timestamp.with_timezone(&Local));
+    }
+
+    let fallback = strip_weekday(value)?;
+    DateTime::parse_from_str(&fallback, "%b %e %H:%M:%S %z %Y")
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Local))
+}
+
+fn parse_lastb_timestamp(value: &str, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    let year = now.year();
+    let naive = parse_lastb_naive(value, year)?;
+    let mut timestamp = resolve_local_datetime(naive)?;
+    if timestamp > now + ChronoDuration::hours(24) {
+        let previous_year = parse_lastb_naive(value, year - 1)?;
+        timestamp = resolve_local_datetime(previous_year)?;
+    }
+    Some(timestamp)
+}
+
+fn parse_lastb_naive(value: &str, year: i32) -> Option<NaiveDateTime> {
+    let with_weekday = format!("{} {}", value, year);
+    if let Ok(parsed) = NaiveDateTime::parse_from_str(&with_weekday, "%a %b %e %H:%M %Y") {
+        return Some(parsed);
+    }
+
+    let without_weekday = format!("{} {}", strip_weekday(value)?, year);
+    NaiveDateTime::parse_from_str(&without_weekday, "%b %e %H:%M %Y").ok()
+}
+
+fn strip_weekday(value: &str) -> Option<String> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.len() >= 4 {
+        Some(parts[1..].join(" "))
+    } else {
+        None
+    }
+}
+
+fn resolve_local_datetime(value: NaiveDateTime) -> Option<DateTime<Local>> {
+    match Local.from_local_datetime(&value) {
+        LocalResult::Single(timestamp) => Some(timestamp),
+        LocalResult::Ambiguous(earliest, _) => Some(earliest),
+        LocalResult::None => None,
+    }
+}
+
+fn format_relative_age(now: DateTime<Local>, then: DateTime<Local>) -> String {
+    let delta = now.signed_duration_since(then);
+    if delta < ChronoDuration::minutes(1) {
+        "<1m ago".to_string()
+    } else if delta < ChronoDuration::hours(1) {
+        format!("{}m ago", delta.num_minutes())
+    } else if delta < ChronoDuration::days(1) {
+        format!("{}h ago", delta.num_hours())
+    } else if delta < ChronoDuration::days(30) {
+        format!("{}d ago", delta.num_days())
+    } else if delta < ChronoDuration::days(365) {
+        format!("{}mo ago", delta.num_days() / 30)
+    } else {
+        format!("{}y ago", delta.num_days() / 365)
+    }
+}
+
+fn is_within_window(now: DateTime<Local>, then: DateTime<Local>, window: ChronoDuration) -> bool {
+    let delta = now.signed_duration_since(then);
+    delta >= ChronoDuration::zero() && delta <= window
 }
 
 fn probe_service_statuses(services: &[String]) -> Result<Vec<RenderedItem>, String> {
@@ -735,41 +988,13 @@ fn get_logged_in_user_count() -> (usize, &'static str) {
     if let Some(count) = count_logged_in_users_from_linux_utmp() {
         (count, "linux utmp")
     } else {
-        (get_logged_in_user_count_via_libc(), "libc utmpx fallback")
+        (0, "linux utmp unavailable")
     }
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-fn get_logged_in_user_count() -> (usize, &'static str) {
-    (get_logged_in_user_count_via_libc(), "libc utmpx")
-}
-
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn get_logged_in_user_count() -> (usize, &'static str) {
     (0, "unsupported")
-}
-
-#[cfg(unix)]
-fn get_logged_in_user_count_via_libc() -> usize {
-    let mut count = 0;
-
-    unsafe {
-        setutxent();
-        loop {
-            let entry = getutxent();
-            if entry.is_null() {
-                break;
-            }
-
-            let record = &*entry;
-            if record.ut_type == USER_PROCESS && record.ut_user[0] != 0 {
-                count += 1;
-            }
-        }
-        endutxent();
-    }
-
-    count
 }
 
 #[cfg(target_os = "linux")]
@@ -885,10 +1110,10 @@ fn detect_virtualization() -> (Option<String>, String, Option<ProbeIssue>) {
         return (Some("Docker".to_string()), "/.dockerenv".to_string(), None);
     }
 
-    if let Ok(content) = fs::read_to_string("/proc/1/cgroup") {
-        if let Some(value) = detect_virtualization_from_cgroup(&content) {
-            return (Some(value), "/proc/1/cgroup".to_string(), None);
-        }
+    if let Ok(content) = fs::read_to_string("/proc/1/cgroup")
+        && let Some(value) = detect_virtualization_from_cgroup(&content)
+    {
+        return (Some(value), "/proc/1/cgroup".to_string(), None);
     }
 
     match run_command_with_timeout("systemd-detect-virt", &[], &[], CORE_PROBE_TIMEOUT_MS) {
@@ -912,12 +1137,13 @@ fn detect_virtualization() -> (Option<String>, String, Option<ProbeIssue>) {
 }
 
 #[cfg(unix)]
-fn collect_disk_usage_items() -> Vec<RenderedItem> {
+fn collect_disk_usage_items() -> (Option<UsageSummary>, Vec<RenderedItem>) {
     let file = match File::open("/proc/mounts") {
         Ok(file) => file,
-        Err(_) => return Vec::new(),
+        Err(_) => return (None, Vec::new()),
     };
 
+    let mut root_disk = None;
     let mut items = Vec::new();
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -928,46 +1154,49 @@ fn collect_disk_usage_items() -> Vec<RenderedItem> {
         let fstype = fields[2];
 
         if mount_path == "/" {
-            if let Some(item) = disk_usage_item(mount_path, "Disk usage (root):") {
+            if let Some((summary, item)) = disk_usage_item(mount_path, "Disk usage (root):") {
+                root_disk = Some(summary);
                 items.push(item);
             }
-        } else if matches!(fstype, "nfs" | "nfs4") {
-            if let Some(item) = disk_usage_item(mount_path, "Disk usage (nfs):") {
-                items.push(item);
-            }
+        } else if matches!(fstype, "nfs" | "nfs4")
+            && let Some((_, item)) = disk_usage_item(mount_path, "Disk usage (nfs):")
+        {
+            items.push(item);
         }
     }
 
-    items
+    (root_disk, items)
 }
 
 #[cfg(not(unix))]
-fn collect_disk_usage_items() -> Vec<RenderedItem> {
-    Vec::new()
+fn collect_disk_usage_items() -> (Option<UsageSummary>, Vec<RenderedItem>) {
+    (None, Vec::new())
 }
 
 #[cfg(unix)]
-fn disk_usage_item(mount_path: &str, label: &str) -> Option<RenderedItem> {
+fn disk_usage_item(mount_path: &str, label: &str) -> Option<(UsageSummary, RenderedItem)> {
     let (total_bytes, used_bytes) = get_mount_usage(mount_path)?;
     let (used_str, total_str, ratio) = human_readable_usage(used_bytes, total_bytes);
-    Some(RenderedItem {
-        label: label.to_string(),
-        value: format!(
-            "{} => {}/{} ({:.2}%)",
-            mount_path, used_str, total_str, ratio
-        ),
-    })
+    let summary = UsageSummary {
+        used_gb: bytes_to_gb(used_bytes),
+        total_gb: bytes_to_gb(total_bytes),
+        ratio,
+    };
+    Some((
+        summary,
+        RenderedItem {
+            label: label.to_string(),
+            value: format!(
+                "{} => {}/{} ({:.2}%)",
+                mount_path, used_str, total_str, ratio
+            ),
+        },
+    ))
 }
 
 #[cfg(unix)]
 fn get_mount_usage(mountpoint: &str) -> Option<(u64, u64)> {
-    let c_path = CString::new(mountpoint).ok()?;
-    let mut stat = MaybeUninit::<statvfs>::uninit();
-    let ret = unsafe { statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
-    if ret != 0 {
-        return None;
-    }
-    let stat = unsafe { stat.assume_init() };
+    let stat = statvfs(mountpoint).ok()?;
 
     let block_size = stat.f_frsize;
     let blocks_used = stat.f_blocks.saturating_sub(stat.f_bfree);
@@ -992,6 +1221,11 @@ fn human_readable_usage(used: u64, total: u64) -> (String, String, f64) {
     let used_str = format!("{:.2} {}", used_f, suffix);
     let total_str = format!("{:.2} {}", total_f, suffix);
     (used_str, total_str, ratio)
+}
+
+#[cfg(unix)]
+fn bytes_to_gb(value: u64) -> f64 {
+    value as f64 / 1024.0 / 1024.0 / 1024.0
 }
 
 #[cfg(unix)]

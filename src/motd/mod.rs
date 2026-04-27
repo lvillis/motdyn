@@ -11,8 +11,8 @@ use render::{
     build_verbose_items, current_viewer_role, format_aligned_items, paint, render_module_lines,
     resolve_modules, resolve_output_settings,
 };
+use types::{DEFAULT_FAREWELL, PaintKind};
 pub use types::{ModuleProfile, RenderContext};
-use types::{PaintKind, DEFAULT_FAREWELL};
 use welcome::resolve_welcome_text;
 
 pub fn render(verbose: bool, profile: ModuleProfile, cfg: &MotdConfig, ctx: &RenderContext) {

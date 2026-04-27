@@ -2,140 +2,96 @@
 
 <div align="center">
   <h1><code>motdyn</code></h1>
-  <p><strong>Dynamic MOTD CLI for Linux login sessions.</strong></p>
+  <p><strong>Fast, dynamic MOTD output for Linux login sessions.</strong></p>
 
   <p>
     <a href="https://crates.io/crates/motdyn">
       <img src="https://img.shields.io/crates/v/motdyn.svg" alt="crates.io version">
     </a>
-    <a href="https://github.com/lvillis/motdyn">
-      <img src="https://img.shields.io/github/repo-size/lvillis/motdyn?style=flat-square&color=328657" alt="repository size">
-    </a>
     <a href="https://github.com/lvillis/motdyn/actions">
       <img src="https://github.com/lvillis/motdyn/actions/workflows/ci.yaml/badge.svg" alt="build status">
-    </a>
-    <a href="https://hub.docker.com/r/lvillis/motdyn">
-      <img src="https://img.shields.io/docker/pulls/lvillis/motdyn?style=flat-square" alt="docker pulls">
-    </a>
-    <a href="https://hub.docker.com/r/lvillis/motdyn">
-      <img src="https://img.shields.io/docker/image-size/lvillis/motdyn/latest?style=flat-square" alt="image size">
     </a>
   </p>
 </div>
 
-`motdyn` prints a concise snapshot of the current host state when a user opens a shell. It is built for Linux SSH and login-shell workflows where fast context matters more than dashboards or long-term monitoring.
+`motdyn` prints a compact host snapshot when a user opens a shell. It is designed for SSH and login-shell paths where output must be useful, fast, and safe to fail.
 
-## Quick Start
+## Features
 
-Install from crates.io:
+- Shows host, network, user, time, uptime, load, OS, kernel, virtualization, CPU, memory, swap, and disk usage.
+- Adds root-focused login security summaries for last login and failed login attempts.
+- Supports role-aware output: root gets the full view, non-root users get a smaller baseline by default.
+- Uses hard timeouts and panic isolation so a probe failure does not block shell startup.
+- Provides a slim container build that only renders environment templates.
+
+## Install
 
 ```bash
 cargo install motdyn
+cargo install motdyn --no-default-features --features slim
 ```
 
-Run once:
+Docker images are published in full and slim variants:
+
+```bash
+docker run --rm lvillis/motdyn:latest --help
+docker run --rm lvillis/motdyn:slim --help
+```
+
+## Usage
+
+Print the current MOTD:
 
 ```bash
 motdyn
+motdyn --compact
+motdyn --profile full
+motdyn --plain
 ```
 
-Install for login shells:
+Install or remove login hooks:
 
 ```bash
 sudo motdyn install
 motdyn install --user
-motdyn install --user --target bash_profile
-```
-
-Check status:
-
-```bash
-motdyn status
 motdyn status --user
-motdyn status --user --target zprofile
-```
-
-## What It Shows
-
-Depending on the environment and configured module order, `motdyn` can print:
-
-- current time and timezone
-- system uptime
-- operating system and kernel
-- host name
-- CPU, memory, and swap usage
-- current user, source IP, and logged-in user count
-- main network interface and IPv4 address
-- root and NFS filesystem usage
-- virtualization or container information
-
-## Installation
-
-### Cargo
-
-```bash
-cargo install motdyn
-```
-
-### Docker
-
-```bash
-docker build -t motdyn .
-docker run --rm motdyn --help
-```
-
-### Login Hooks
-
-System-wide install writes:
-
-```text
-/etc/profile.d/motdyn.sh
-```
-
-User install always manages:
-
-```text
-~/.profile
-```
-
-If they already exist, user install also updates:
-
-- `~/.bash_profile`
-- `~/.bash_login`
-- `~/.zprofile`
-
-Remove hooks with:
-
-```bash
-sudo motdyn uninstall
 motdyn uninstall --user
-motdyn uninstall --user --target bash_profile
 ```
 
-User install blocks are guarded so `motdyn` only runs once even if multiple login profile files source each other.
-Installed login hooks run `motdyn --compact` so the login MOTD stays dense and screen-friendly by default.
-
-## Usage
+Render a template without system probing:
 
 ```bash
-motdyn [OPTIONS] [COMMAND]
+motdyn --text 'Hello ${USER}, service=${SERVICE_NAME:-unknown}'
+motdyn --file ./motd.template --env-prefix APP_
 ```
 
-Commands:
+Template syntax:
 
-- `install`
-- `uninstall`
-- `status`
+- `${VAR}` reads environment variable `VAR`.
+- `${VAR:-default}` uses `default` when the variable is missing or empty.
+- `$$` prints a literal `$`.
+- `--env-prefix APP_` makes `${NAME}` read `APP_NAME`.
 
-Global options:
+## Build Variants
 
-- `-v`, `--verbose`
-- `--profile auto|full|basic`
-- `--plain`
-- `--compact`
-- `--section-headers`
+Default builds use the `full` feature set:
 
-Without a subcommand, `motdyn` prints the current MOTD immediately.
+- `template`: local template rendering.
+- `color`: ANSI color output.
+- `config-toml`: `/etc/motdyn/config.toml` and `~/.config/motdyn/config.toml`.
+- `system-probes`: local Linux host facts.
+- `login-security`: `lastlog` and `lastb` summaries.
+- `remote-welcome`: `file://`, `http`, and `https` welcome sources with cache revalidation.
+- `install-hooks`: login shell hook management.
+
+Slim builds compile only the template renderer:
+
+```bash
+cargo build --release --no-default-features --features slim
+docker build --build-arg 'CARGO_FEATURE_FLAGS=--no-default-features --features slim' -t motdyn:slim .
+```
+
+Release artifacts and Docker tags are split as `motdyn-*` and `motdyn-slim-*`, with image tags such as `latest` and `slim`.
 
 ## Configuration
 
@@ -150,8 +106,6 @@ User config:
 ```text
 ~/.config/motdyn/config.toml
 ```
-
-User config overrides system config.
 
 Example:
 
@@ -182,46 +136,21 @@ section_headers = false
 hidden_fields = ["source_ip", "nfs_disks"]
 ```
 
-Supported module names:
+Supported modules:
 
-- `host`
-- `network`
-- `user`
-- `time`
-- `uptime`
-- `load`
-- `os`
-- `kernel`
-- `virtualization`
-- `cpu`
-- `memory`
-- `swap`
-- `disk`
-- `last_login`
-- `failed_login`
-- `services`
-- `updates`
+```text
+host network user time uptime load os kernel virtualization cpu memory swap disk last_login failed_login services updates
+```
 
 Notes:
 
-- `welcome` is the single-source shortcut. `welcome_sources` is preferred when you want ordered fallback.
-- each welcome source may be a literal string, a local path, a `file://` URL, or an `http`/`https` URL.
-- sources are tried in order until one yields usable content.
-- `--profile auto` is the default: `root` keeps the full built-in view, while non-root users default to the basic profile: `host`, `network`, `user`, `time`, `uptime`, `load`.
-- `--profile full` forces the complete built-in module set even for non-root sessions.
-- `--profile basic` forces the compact baseline even for `root`.
-- if `modules` is an empty list, only the welcome and farewell text are shown.
-- explicit `modules` always override the role-based default.
-- `services` is opt-in and reads the ordered list from `[service_status].services`.
-- `updates` is opt-in and uses local package manager metadata when `apt` or `dnf` is available.
-- `last_login` and `failed_login` use `lastlog` and `lastb` when present.
-- external probes use short hard timeouts so slow commands do not stall login.
-- login hook scripts ignore `motdyn` failures so a non-zero exit does not abort shell startup.
-- remote welcome defaults to a 250 ms timeout, uses a local cache, sends `If-None-Match` / `If-Modified-Since` when cache metadata is available, and falls back to stale cache or default text on failure.
-- `--verbose` shows config loading, module resolution, output mode, probe sources, degraded modules, and fallback notes.
-- `hidden_fields` currently supports `main_interface`, `main_ipv4`, `source_ip`, `login_user_count`, `timezone`, `kernel_version`, `virtualization`, `swap`, and `nfs_disks`.
+- `welcome_sources` are tried in order until one returns usable text.
+- `--profile auto` is default: root uses the full built-in view, non-root uses `host`, `network`, `user`, `time`, `uptime`, and `load`.
+- Explicit `modules` always override role-based defaults.
+- `services` and `updates` are opt-in modules.
+- Remote welcome uses a 250 ms default timeout, cache revalidation, and stale-cache fallback.
 
-## Example Output
+## Example
 
 ```shell
 $ motdyn
@@ -238,24 +167,9 @@ Operating system:  Rocky Linux 9.5
 Kernel version:    5.14.0-503.15.1.el9_5.x86_64
 Virtualization:    kvm
 CPU:               2x AMD EPYC 9654 (192 cores)
-Memory used/total: 384.00/1536.00 GB (25.00%)
-Swap used/total:   0.00/64.00 GB (0.00%)
-Disk usage (root): / => 1.20 TB/7.68 TB (15.62%)
+Resource use:      mem  25% ###-------  disk  16% ##--------
+Last login:        4d ago from 10.10.1.15 via ssh
+Failed login:      clear
 
 Have a nice day!
 ```
-
-## Compatibility
-
-`motdyn` is Linux-oriented and works best in environments with:
-
-- `/proc`
-- `ip`
-- `/etc/profile.d`
-- `systemd-detect-virt` (optional)
-- Linux `utmp` session records for login user counting
-- `lastlog` and `lastb` for the login-security modules
-- `systemctl` for the service status module
-- `apt` or `dnf` for the updates module
-
-Some fields may degrade to `unknown` on minimal systems or containers.
