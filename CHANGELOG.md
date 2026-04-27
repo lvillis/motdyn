@@ -1,8 +1,34 @@
+## [1.0.9] - 2026-04-27
+
+### 🚀 Features
+
+- Improve output controls, login diagnostics, and install hooks
+- Improve MOTD configuration, install flow, and welcome handling
+- *(motd)* Add auto, full, and basic output profiles
+- Add slim template renderer and harden MOTD output
+
+### 🐛 Bug Fixes
+
+- Harden login path against slow or failing probes
+- Harden login flow and refine compact MOTD layout
+
+### 🚜 Refactor
+
+- *(motd)* Split monolithic MOTD module
+- Tighten config validation and installer errors
+
+### 🧪 Testing
+
+- Expand parser fallback coverage
 ## [1.0.8] - 2026-03-24
 
 ### 🐛 Bug Fixes
 
 - Ci
+
+### ⚙️ Miscellaneous Tasks
+
+- Release motdyn version 1.0.8
 ## [1.0.7] - 2026-03-24
 
 ### 🐛 Bug Fixes
