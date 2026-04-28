@@ -1,8 +1,17 @@
+## [1.0.11] - 2026-04-28
+
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* Update
 ## [1.0.10] - 2026-04-28
 
 ### 🐛 Bug Fixes
 
 - *(slim)* Support template rendering without default features
+
+### ⚙️ Miscellaneous Tasks
+
+- Release motdyn version 1.0.10
 ## [1.0.9] - 2026-04-27
 
 ### 🚀 Features

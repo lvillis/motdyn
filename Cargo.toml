@@ -1,6 +1,6 @@
 [package]
 name = "motdyn"
-version = "1.0.10"
+version = "1.0.11"
 edition = "2024"
 description = "Dynamic MOTD CLI for Linux login sessions."
 license = "MIT"
