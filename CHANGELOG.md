@@ -1,3 +1,8 @@
+## [1.0.10] - 2026-04-28
+
+### 🐛 Bug Fixes
+
+- *(slim)* Support template rendering without default features
 ## [1.0.9] - 2026-04-27
 
 ### 🚀 Features
@@ -20,6 +25,10 @@
 ### 🧪 Testing
 
 - Expand parser fallback coverage
+
+### ⚙️ Miscellaneous Tasks
+
+- Release motdyn version 1.0.9
 ## [1.0.8] - 2026-03-24
 
 ### 🐛 Bug Fixes
