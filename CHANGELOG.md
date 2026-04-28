@@ -1,8 +1,14 @@
+## [1.0.12] - 2026-04-28
+
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* Update
 ## [1.0.11] - 2026-04-28
 
 ### ⚙️ Miscellaneous Tasks
 
 - *(ci)* Update
+- Release motdyn version 1.0.11
 ## [1.0.10] - 2026-04-28
 
 ### 🐛 Bug Fixes
