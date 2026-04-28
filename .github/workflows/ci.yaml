@@ -96,4 +96,3 @@ jobs:
       contents: read
       packages: write
     uses: ./.github/workflows/docker.yaml
-    secrets: inherit
