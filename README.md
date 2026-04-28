@@ -34,8 +34,8 @@ cargo install motdyn --no-default-features
 Docker images are published in full and slim variants:
 
 ```bash
-docker run --rm lvillis/motdyn:latest --help
-docker run --rm lvillis/motdyn:slim --help
+docker run --rm ghcr.io/lvillis/motdyn:latest --help
+docker run --rm ghcr.io/lvillis/motdyn:slim --help
 ```
 
 ## Usage
