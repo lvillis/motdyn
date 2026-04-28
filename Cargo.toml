@@ -28,8 +28,10 @@ url = { version = "2.5.8", default-features = false, features = ["std"], optiona
 
 [features]
 default = ["full"]
-full = ["template", "color", "config-toml", "system-probes", "login-security", "remote-welcome", "install-hooks"]
-slim = ["template"]
+# The template renderer is always compiled; `slim` is a named alias for the
+# dependency-minimal `--no-default-features` build.
+full = ["color", "config-toml", "system-probes", "login-security", "remote-welcome", "install-hooks"]
+slim = []
 template = []
 color = ["dep:colored"]
 config-toml = ["dep:serde", "dep:toml"]

@@ -1,6 +1,5 @@
 use osarg::{Arg, Error, Parser, help};
 use std::ffi::OsString;
-#[cfg(feature = "template")]
 use std::path::PathBuf;
 
 #[cfg(feature = "config-toml")]
@@ -9,7 +8,6 @@ mod config;
 mod installer;
 #[cfg(feature = "full")]
 mod motd;
-#[cfg(feature = "template")]
 mod template;
 
 #[cfg(feature = "full")]
@@ -40,7 +38,7 @@ const ROOT_HELP_SECTIONS: &[help::Section<'static>] = &[
     ),
 ];
 
-#[cfg(all(not(feature = "full"), feature = "template"))]
+#[cfg(not(feature = "full"))]
 const ROOT_HELP_SECTIONS: &[help::Section<'static>] = &[
     help::Section::new(
         "template options:",
@@ -51,12 +49,6 @@ const ROOT_HELP_SECTIONS: &[help::Section<'static>] = &[
         "  -h, --help       show help\n  -V, --version    show version",
     ),
 ];
-
-#[cfg(all(not(feature = "full"), not(feature = "template")))]
-const ROOT_HELP_SECTIONS: &[help::Section<'static>] = &[help::Section::new(
-    "standard options:",
-    "  -h, --help       show help\n  -V, --version    show version",
-)];
 
 const ROOT_HELP: help::Help<'static> =
     help::Help::new("motdyn [OPTIONS] [COMMAND]", ROOT_HELP_SECTIONS);
@@ -102,18 +94,15 @@ struct Cli {
     section_headers: bool,
     #[cfg(feature = "install-hooks")]
     cmd: Option<Commands>,
-    #[cfg(feature = "template")]
     template: TemplateInput,
 }
 
-#[cfg(feature = "template")]
 #[derive(Debug, Default)]
 struct TemplateInput {
     source: Option<TemplateSource>,
     env_prefix: Option<String>,
 }
 
-#[cfg(feature = "template")]
 #[derive(Debug)]
 enum TemplateSource {
     Text(String),
@@ -205,10 +194,7 @@ fn parse_cli_from_env() -> Result<CliAction, Error> {
     parse_cli(Parser::from_env())
 }
 
-#[cfg(all(
-    test,
-    any(feature = "full", feature = "template", feature = "install-hooks")
-))]
+#[cfg(test)]
 fn parse_cli_from_args<T, S>(args: T) -> Result<CliAction, Error>
 where
     T: IntoIterator<Item = S>,
@@ -217,15 +203,11 @@ where
     parse_cli(Parser::from_args(args))
 }
 
-#[cfg(any(feature = "full", feature = "template", feature = "install-hooks"))]
 fn parse_cli<I>(mut parser: Parser<I>) -> Result<CliAction, Error>
 where
     I: Iterator<Item = OsString>,
 {
-    #[cfg(any(feature = "full", feature = "template", feature = "install-hooks"))]
     let mut cli = Cli::default();
-    #[cfg(not(any(feature = "full", feature = "template", feature = "install-hooks")))]
-    let cli = Cli::default();
 
     while let Some(arg) = parser.next()? {
         match arg {
@@ -251,15 +233,12 @@ where
             Arg::Long("section-headers") => {
                 cli.section_headers = true;
             }
-            #[cfg(feature = "template")]
             Arg::Long("text") => {
                 cli.template.source = Some(TemplateSource::Text(parser.string_owned()?));
             }
-            #[cfg(feature = "template")]
             Arg::Long("file") => {
                 cli.template.source = Some(TemplateSource::File(parser.value()?.to_path_buf()));
             }
-            #[cfg(feature = "template")]
             Arg::Long("env-prefix") => {
                 cli.template.env_prefix = Some(parser.string_owned()?);
             }
@@ -277,20 +256,6 @@ where
     }
 
     Ok(CliAction::Run(cli))
-}
-
-#[cfg(not(any(feature = "full", feature = "template", feature = "install-hooks")))]
-fn parse_cli<I>(mut parser: Parser<I>) -> Result<CliAction, Error>
-where
-    I: Iterator<Item = OsString>,
-{
-    match parser.next()? {
-        Some(Arg::Short('h')) | Some(Arg::Long("help")) => Ok(CliAction::Help(ROOT_HELP)),
-        Some(Arg::Short('V')) | Some(Arg::Long("version")) => Ok(CliAction::Version),
-        Some(Arg::Value(value)) => Err(Error::unexpected_argument(value.to_os_string())),
-        Some(other) => Err(other.unexpected()),
-        None => Ok(CliAction::Run(Cli::default())),
-    }
 }
 
 #[cfg(feature = "install-hooks")]
@@ -329,15 +294,12 @@ where
             Arg::Long("section-headers") => {
                 cli.section_headers = true;
             }
-            #[cfg(feature = "template")]
             Arg::Long("text") => {
                 cli.template.source = Some(TemplateSource::Text(parser.string_owned()?));
             }
-            #[cfg(feature = "template")]
             Arg::Long("file") => {
                 cli.template.source = Some(TemplateSource::File(parser.value()?.to_path_buf()));
             }
-            #[cfg(feature = "template")]
             Arg::Long("env-prefix") => {
                 cli.template.env_prefix = Some(parser.string_owned()?);
             }
@@ -378,10 +340,6 @@ fn parse_user_profile_target(value: String) -> Result<installer::UserProfileTarg
 }
 
 fn run_cli(cli: Cli) {
-    #[cfg(not(any(feature = "full", feature = "template", feature = "install-hooks")))]
-    let _ = cli;
-
-    #[cfg(feature = "template")]
     if cli.template.source.is_some() {
         render_template_or_exit(&cli.template);
         return;
@@ -422,7 +380,6 @@ fn run_cli(cli: Cli) {
     println!("{}", DEFAULT_TEMPLATE_OUTPUT);
 }
 
-#[cfg(feature = "template")]
 fn render_template_or_exit(input: &TemplateInput) {
     let source = match input.source.as_ref() {
         Some(TemplateSource::Text(text)) => text.clone(),
@@ -487,10 +444,7 @@ fn run_motd_safely(cli: &Cli) {
     let _ = result;
 }
 
-#[cfg(all(
-    test,
-    any(feature = "full", feature = "template", feature = "install-hooks")
-))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -556,7 +510,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "template")]
     #[test]
     fn osarg_parses_template_options() {
         let cli = parse_run(&["--text", "hello ${NAME}", "--env-prefix", "APP_"]);

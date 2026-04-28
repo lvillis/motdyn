@@ -28,7 +28,7 @@
 
 ```bash
 cargo install motdyn
-cargo install motdyn --no-default-features --features slim
+cargo install motdyn --no-default-features
 ```
 
 Docker images are published in full and slim variants:
@@ -76,7 +76,6 @@ Template syntax:
 
 Default builds use the `full` feature set:
 
-- `template`: local template rendering.
 - `color`: ANSI color output.
 - `config-toml`: `/etc/motdyn/config.toml` and `~/.config/motdyn/config.toml`.
 - `system-probes`: local Linux host facts.
@@ -87,8 +86,8 @@ Default builds use the `full` feature set:
 Slim builds compile only the template renderer:
 
 ```bash
-cargo build --release --no-default-features --features slim
-docker build --build-arg 'CARGO_FEATURE_FLAGS=--no-default-features --features slim' -t motdyn:slim .
+cargo build --release --no-default-features
+docker build --build-arg 'CARGO_FEATURE_FLAGS=--no-default-features' -t motdyn:slim .
 ```
 
 Release artifacts and Docker tags are split as `motdyn-*` and `motdyn-slim-*`, with image tags such as `latest` and `slim`.

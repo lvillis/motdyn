@@ -60,7 +60,7 @@ jobs:
       - name: Run Clippy
         run: |
           cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo clippy --locked --all-targets --no-default-features --features slim -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features -- -D warnings
 
   test:
     name: test
@@ -78,10 +78,10 @@ jobs:
       - name: Run tests
         run: |
           cargo test --locked --all-features
-          cargo test --locked --no-default-features --features slim
+          cargo test --locked --no-default-features
       - name: Smoke test CLI help
         run: |
           cargo run --locked -- --help >/dev/null
           cargo run --locked -- status --help >/dev/null
-          cargo run --locked --no-default-features --features slim -- --help >/dev/null
-          cargo run --locked --no-default-features --features slim -- --text 'service=${SERVICE:-unknown}' >/dev/null
+          cargo run --locked --no-default-features -- --help >/dev/null
+          cargo run --locked --no-default-features -- --text 'service=${SERVICE:-unknown}' >/dev/null

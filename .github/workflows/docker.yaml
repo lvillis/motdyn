@@ -97,6 +97,6 @@ jobs:
           tags: ${{ steps.meta-slim.outputs.tags }}
           labels: ${{ steps.meta-slim.outputs.labels }}
           build-args: |
-            CARGO_FEATURE_FLAGS=--no-default-features --features slim
+            CARGO_FEATURE_FLAGS=--no-default-features
           cache-from: type=gha,scope=motdyn-docker-slim
           cache-to: type=gha,mode=max,scope=motdyn-docker-slim

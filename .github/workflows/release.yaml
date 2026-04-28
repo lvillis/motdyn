@@ -59,12 +59,12 @@ jobs:
       - name: Run Clippy
         run: |
           cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo clippy --locked --all-targets --no-default-features --features slim -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features -- -D warnings
 
       - name: Run tests
         run: |
           cargo test --locked --all-features
-          cargo test --locked --no-default-features --features slim
+          cargo test --locked --no-default-features
 
   build:
     needs: verify
@@ -128,7 +128,7 @@ jobs:
 
           feature_flags=()
           if [[ "${{ matrix.variant }}" == "slim" ]]; then
-            feature_flags+=(--no-default-features --features slim)
+            feature_flags+=(--no-default-features)
           fi
 
           case "${{ matrix.builder }}" in
