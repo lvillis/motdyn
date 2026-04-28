@@ -34,8 +34,8 @@ cargo install motdyn --no-default-features
 Docker images are published in full and slim variants:
 
 ```bash
-docker run --rm ghcr.io/lvillis/motdyn:latest --help
-docker run --rm ghcr.io/lvillis/motdyn:slim --help
+docker run --rm ghcr.io/lvillis/motdyn:1.0.11 --help
+docker run --rm ghcr.io/lvillis/motdyn:1.0.11-slim --help
 ```
 
 ## Usage
@@ -90,7 +90,7 @@ cargo build --release --no-default-features
 docker build --build-arg 'CARGO_FEATURE_FLAGS=--no-default-features' -t motdyn:slim .
 ```
 
-Release artifacts and Docker tags are split as `motdyn-*` and `motdyn-slim-*`, with image tags such as `latest` and `slim`.
+Release artifacts and Docker tags are split as `motdyn-*` and `motdyn-slim-*`; images are published only for version tags.
 
 ## Configuration
 

@@ -36,7 +36,6 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}},value=${{ github.ref_name }}
             type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
           labels: |
@@ -51,7 +50,6 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=slim,enable={{is_default_branch}}
             type=semver,pattern={{version}}-slim,value=${{ github.ref_name }}
             type=semver,pattern={{major}}.{{minor}}-slim,value=${{ github.ref_name }}
           labels: |
