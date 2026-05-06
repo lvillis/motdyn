@@ -50,6 +50,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/opt/app/target \
     set -eux \
     && rust_target="$(cat /tmp/rust-target)" \
+    && cargo clean --release --target="${rust_target}" -p motdyn \
     && cargo build --release --locked --target="${rust_target}" ${CARGO_FEATURE_FLAGS} \
     && cp "target/${rust_target}/release/motdyn" /tmp/motdyn
 
