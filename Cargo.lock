@@ -763,9 +763,9 @@ checksum = "0c8d0fd677905edcbeedbf2edb6494d676f0e98d54d5cf9bda0b061cb8fb8aba"
 
 [[package]]
 name = "reqx"
-version = "0.1.35"
+version = "0.1.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07adddfc9ff5d95294f9582e508f9b71c7443da0ed9c2586e2bbd205d59a027e"
+checksum = "ec372a2e4b56feed9dddd8bfdf671e12d946f5fe2697a4fd765611ae231fcb32"
 dependencies = [
  "brotli",
  "bytes",

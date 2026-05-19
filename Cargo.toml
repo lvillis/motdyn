@@ -23,7 +23,7 @@ osarg = { version = "0.1.1", default-features = false }
 rustix = { version = "1.1.4", default-features = false, features = ["fs", "process"], optional = true }
 toml = { version = "1.1.2", default-features = false, features = ["parse", "serde"], optional = true }
 serde = { version = "1.0.228", default-features = false, features = ["derive"], optional = true }
-reqx = { version = "0.1.35", default-features = false, features = ["blocking-tls-rustls-ring"], optional = true }
+reqx = { version = "0.1.38", default-features = false, features = ["blocking-tls-rustls-ring"], optional = true }
 url = { version = "2.5.8", default-features = false, features = ["std"], optional = true }
 
 [features]
