@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$BUILDPLATFORM rust:1.95.0-slim-trixie AS builder
+FROM --platform=$BUILDPLATFORM rust:1.96.0-slim-trixie AS builder
 
 ARG TARGETARCH
 ARG CARGO_FEATURE_FLAGS=""
