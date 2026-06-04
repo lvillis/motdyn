@@ -17,7 +17,7 @@ include = [
 ]
 
 [dependencies]
-chrono = { version = "0.4.44", default-features = false, features = ["clock"], optional = true }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"], optional = true }
 colored = { version = "3.1.1", default-features = false, optional = true }
 osarg = { version = "0.1.1", default-features = false }
 rustix = { version = "1.1.4", default-features = false, features = ["fs", "process"], optional = true }
